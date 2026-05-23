@@ -3,6 +3,9 @@
 //! Provides single browser session (noVNC + CDP) for MCP Playwright and Hermes.
 //! CORE: pure URL generation + invariant check
 //! SHELL: DockerBrowserShell (bollard)
+//!
+//! CHANGE: per-project host ports via pure deterministic hash
+*/
 
 mod browser;
 
