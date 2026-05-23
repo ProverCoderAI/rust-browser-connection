@@ -50,7 +50,7 @@ impl DockerBrowserShell {
             let mut endpoints = HashMap::new();
             endpoints.insert(net.to_string(), EndpointSettings::default());
             networking_config = Some(NetworkingConfig {
-                endpoints_config: Some(endpoints),
+                endpoints_config: endpoints,
             });
         }
 
