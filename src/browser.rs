@@ -2,10 +2,13 @@
 //!
 //! Separated from core pure functions per AGENTS.md (CORE vs SHELL).
 //! All Docker interactions live here.
+//!
+//! INVARIANT: ∀ project_id, repeated ensure_browser_container(project_id) → exactly one container named "dg-{project_id}-browser"
+//! The container provides noVNC (6080), VNC (5900), CDP (9223).
 
 use anyhow::{Context, Result};
 use bollard::container::{Config, CreateContainerOptions, StartContainerOptions};
-use bollard::models::{HostConfig, PortBinding};
+use bollard::models::{HostConfig, PortBinding, NetworkingConfig, EndpointSettings};
 use bollard::Docker;
 use std::collections::HashMap;
 
@@ -20,11 +23,10 @@ impl DockerBrowserShell {
         Ok(Self { docker })
     }
 
-    pub async fn ensure_browser_container(&self, project_id: &str) -> Result<String> {
+    /// Ensures a single browser container for the project.
+    /// If network is Some(name), the container is created on that network (so main container can reach dg-*-browser:9223 by name).
+    pub async fn ensure_browser_container(&self, project_id: &str, network: Option<&str>) -> Result<String> {
         let name = format!("dg-{}-browser", project_id);
-
-        // In full impl: list containers first, return existing if matches name (enforce single)
-        // For MVP we rely on name uniqueness.
 
         let mut port_bindings = HashMap::new();
         for (container_port, host_port) in [("5900", "5900"), ("6080", "6080"), ("9223", "9223")] {
@@ -37,12 +39,22 @@ impl DockerBrowserShell {
             );
         }
 
+        let mut host_config = HostConfig {
+            port_bindings: Some(port_bindings),
+            ..Default::default()
+        };
+
+        let mut networking_config = None;
+        if let Some(net) = network {
+            let mut endpoints = HashMap::new();
+            endpoints.insert(net.to_string(), EndpointSettings::default());
+            networking_config = Some(NetworkingConfig { endpoints_config: Some(endpoints) });
+        }
+
         let config = Config {
             image: Some("selenium/standalone-chrome:latest".to_string()),
-            host_config: Some(HostConfig {
-                port_bindings: Some(port_bindings),
-                ..Default::default()
-            }),
+            host_config: Some(host_config),
+            networking_config,
             ..Default::default()
         };
 
@@ -53,7 +65,7 @@ impl DockerBrowserShell {
                 self.docker.start_container(&name, None::<StartContainerOptions<String>>).await?;
             }
             Err(e) if e.to_string().contains("already exists") || e.to_string().contains("409") => {
-                // Already running — good, invariant held
+                // Already running — single session invariant preserved
                 log::info!("Container {} already exists (single session invariant preserved)", name);
             }
             Err(e) => return Err(e.into()),
