@@ -1,14 +1,15 @@
-//! Docker shell layer for BrowserConnection (imperative effects via bollard).
-//!
-//! Separated from core pure functions per AGENTS.md (CORE vs SHELL).
-//! All Docker interactions live here.
-//!
-//! INVARIANT: ∀ project_id, repeated ensure_browser_container(project_id) → exactly one container named "dg-{project_id}-browser"
-//! The container provides noVNC (6080), VNC (5900), CDP (9223).
+/*! Docker shell layer for BrowserConnection (imperative effects via bollard).
+
+Separated from core pure functions per AGENTS.md (CORE vs SHELL).
+All Docker interactions live here.
+
+INVARIANT: ∀ project_id, repeated ensure_browser_container(project_id) → exactly one container named "dg-{project_id}-browser"
+The container provides noVNC (6080), VNC (5900), CDP (9223).
+*/
 
 use anyhow::{Context, Result};
-use bollard::container::{Config, CreateContainerOptions, StartContainerOptions};
-use bollard::models::{HostConfig, PortBinding, NetworkingConfig, EndpointSettings};
+use bollard::container::{Config, CreateContainerOptions, StartContainerOptions, NetworkingConfig};
+use bollard::secret::{EndpointSettings, HostConfig, PortBinding};
 use bollard::Docker;
 use std::collections::HashMap;
 
@@ -48,7 +49,9 @@ impl DockerBrowserShell {
         if let Some(net) = network {
             let mut endpoints = HashMap::new();
             endpoints.insert(net.to_string(), EndpointSettings::default());
-            networking_config = Some(NetworkingConfig { endpoints_config: Some(endpoints) });
+            networking_config = Some(NetworkingConfig {
+                endpoints_config: Some(endpoints),
+            });
         }
 
         let config = Config {
