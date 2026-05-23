@@ -1,7 +1,7 @@
 //! CLI entrypoint for docker-git-browser-connection
 //!
 //! Usage (из коробки):
-//!   docker-git-browser-connection start --project myproj
+//!   docker-git-browser-connection start --project myproj [--network my-net]
 //!
 //! This binary is what MCP Playwright / Hermes / docker-git entrypoints invoke
 //! to guarantee a single unified browser (noVNC + CDP).
@@ -22,6 +22,9 @@ enum Commands {
     Start {
         #[arg(long)]
         project: String,
+        /// Docker network to attach the browser container to (so main container can reach it by name for CDP)
+        #[arg(long)]
+        network: Option<String>,
     },
     /// Show status / URLs for the project's browser
     Status {
@@ -39,8 +42,9 @@ async fn main() -> anyhow::Result<()> {
     let conn = BrowserConnection::new()?;
 
     match cli.command {
-        Commands::Start { project } => {
-            let info: BrowserInfo = conn.start_browser(&project).await?;
+        Commands::Start { project, network } => {
+            let net_ref = network.as_deref();
+            let info: BrowserInfo = conn.start_browser(&project, net_ref).await?;
             println!("Browser started for project: {}", info.project_id);
             println!("Container: {}", info.container_name);
             println!("noVNC: {}", info.novnc_url);
