@@ -5,7 +5,7 @@
 
 mod browser;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use crate::browser::DockerBrowserShell;
 use serde::Serialize;
 
