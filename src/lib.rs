@@ -1,7 +1,8 @@
 //! BrowserConnection — formally verifiable unified browser module for docker-git
 //!
-//! (full header comments from previous version remain — see git history for full)
-//! Provides single browser session (noVNC + CDP) ...
+//! Provides single browser session (noVNC + CDP) for MCP Playwright and Hermes.
+//! CORE: pure URL generation + invariant check
+//! SHELL: DockerBrowserShell (bollard)
 
 mod browser;
 
@@ -27,8 +28,8 @@ impl BrowserConnection {
         Ok(Self { shell })
     }
 
-    pub async fn start_browser(&self, project_id: &str) -> Result<BrowserInfo> {
-        let container_name = self.shell.ensure_browser_container(project_id).await?;
+    pub async fn start_browser(&self, project_id: &str, network: Option<&str>) -> Result<BrowserInfo> {
+        let container_name = self.shell.ensure_browser_container(project_id, network).await?;
 
         Ok(BrowserInfo {
             project_id: project_id.to_string(),
