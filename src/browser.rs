@@ -40,7 +40,7 @@ impl DockerBrowserShell {
             );
         }
 
-        let mut host_config = HostConfig {
+        let host_config = HostConfig {
             port_bindings: Some(port_bindings),
             ..Default::default()
         };
