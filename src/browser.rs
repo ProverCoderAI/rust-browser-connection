@@ -55,7 +55,7 @@ impl DockerBrowserShell {
         }
 
         let config = Config {
-            image: Some("selenium/standalone-chrome:latest".to_string()),
+            image: Some("dg-docker-git-issue-347-browser:docker-git-browser".to_string()),
             host_config: Some(host_config),
             networking_config,
             ..Default::default()
