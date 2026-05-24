@@ -1,72 +1,43 @@
-# docker-git-browser-connection
+# rust-browser-connection
 
-**Rust-only single-browser module for docker-git**: one project browser container with VNC, noVNC and CDP, plus a first-party MCP stdio command named `browser-connection`.
+Rust MCP/noVNC bridge for docker-git: one project = one Chromium container visible in noVNC and controlled through MCP/CDP.
 
-Solves GitHub issue #347: agents control the same Chromium that the user sees through noVNC. There is no separate Playwright browser session and no runtime dependency on `npx @playwright/mcp`.
+## Install
 
-## Binaries
+```bash
+cargo install --git https://github.com/ProverCoderAI/rust-browser-connection --branch main --locked --bins
+```
 
-Installing this crate provides two commands:
+Installs two binaries:
 
 ```text
-docker-git-browser-connection  # browser container lifecycle: start/status
-browser-connection             # MCP stdio server for Codex/Hermes configs
+docker-git-browser-connection  # start/status browser container
+browser-connection             # MCP stdio server for Codex/Hermes
 ```
 
-Install:
+## Start browser manually
 
 ```bash
-cargo install --git https://github.com/ProverCoderAI/rust-browser-connection --bins
+docker-git-browser-connection start --project dg-my-project
 ```
 
-Verify:
+Output contains:
+
+```text
+Container: dg-my-project-browser
+noVNC: http://...
+CDP: http://...
+```
+
+Check status:
 
 ```bash
-which docker-git-browser-connection
-which browser-connection
-docker-git-browser-connection --help
-browser-connection --help
+docker-git-browser-connection status --project dg-my-project
 ```
 
-## Start/reuse the single browser container
+## Codex MCP config
 
-```bash
-# Inside docker-git project containers DOCKER_GIT_PROJECT_DOCKER_HOST is used
-# automatically when /var/run/docker.sock is not mounted.
-docker-git-browser-connection start --project dg-my-project --network container:dg-my-project
-
-# If dg-my-project does not exist yet, the MCP binary also works standalone:
-# it falls back to Docker bridge mode, publishes deterministic project ports,
-# and returns whichever CDP/noVNC URLs are actually reachable from the caller.
-browser-connection --project dg-my-project
-
-# Example output from the lifecycle CLI:
-# Browser started for project: dg-my-project
-# Container: dg-my-project-browser
-# noVNC: http://127.0.0.1:6450/vnc.html?autoconnect=true&resize=remote&path=websockify
-# CDP (for MCP Playwright / Hermes): http://127.0.0.1:9593
-```
-
-Health check:
-
-```bash
-# Use the CDP/noVNC URLs printed by `start`; in containerized Docker hosts the
-# module may choose the browser container IP instead of 127.0.0.1 host ports.
-curl -H 'Host: 127.0.0.1:9222' http://127.0.0.1:9593/json/version
-open 'http://127.0.0.1:6450/vnc.html?autoconnect=true&resize=remote&path=websockify'
-```
-
-## MCP config: use `browser-connection`, not `npx @playwright/mcp`
-
-Do **not** configure docker-git projects like this:
-
-```toml
-[mcp_servers.playwright]
-command = "npx"
-args = ["-y", "@playwright/mcp@latest", "--cdp-endpoint", "http://127.0.0.1:9223"]
-```
-
-That uses the external upstream Playwright MCP command. The docker-git product path is the Rust MCP stdio server from this repo:
+`~/.codex/config.toml`:
 
 ```toml
 [mcp_servers.playwright]
@@ -74,67 +45,22 @@ command = "browser-connection"
 args = ["--project", "dg-my-project"]
 ```
 
-If the Cargo bin directory is not on PATH:
+Use `browser-connection`, not `npx @playwright/mcp`. The MCP server starts/reuses the same Rust-managed browser container automatically.
 
-```toml
-[mcp_servers.playwright]
-command = "/root/.cargo/bin/browser-connection"
-args = ["--project", "dg-my-project"]
-```
+## Hermes MCP config
 
-Hermes YAML equivalent:
+`~/.hermes/config.yaml`:
 
 ```yaml
 mcp_servers:
   playwright:
     command: browser-connection
-    args:
-      - --project
-      - dg-my-project
+    args: ["--project", "dg-my-project"]
     timeout: 120
     connect_timeout: 60
 ```
 
-The MCP command auto-starts/reuses the Rust-managed browser by default. For protocol smoke tests without Docker, pass `--no-start-browser`.
-
-## MCP smoke test
-
-```bash
-printf '%s\n' \
-  '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"probe","version":"0"}}}' \
-  '{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}' \
-  '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}' \
-| browser-connection --project dg-my-project --no-start-browser
-```
-
-Expected output includes:
-
-```text
-"name":"browser-connection"
-"browser_navigate"
-"browser_snapshot"
-"browser_evaluate"
-"browser_click"
-"browser_type"
-"browser_press_key"
-"browser_take_screenshot"
-```
-
-## Runtime flow
-
-```text
-Codex/Hermes MCP client
-        ↓ command = "browser-connection"
-Rust MCP stdio server from this crate
-        ↓ resolved CDP URL (127.0.0.1 host port, shared namespace, or Docker bridge IP)
-Rust-managed Chromium container dg-*-browser
-        ↓ same framebuffer
-resolved noVNC URL (same container/session)
-```
-
-## Supported MCP tools
-
-The first-party MCP server exposes a compact browser automation subset:
+## MCP tools
 
 ```text
 browser_navigate(url)
@@ -146,48 +72,30 @@ browser_press_key(key)
 browser_take_screenshot(full_page?)
 ```
 
-Selectors are CSS selectors. `browser_snapshot` returns page title, URL, visible text and a simple list of interactive elements with selectors.
+## Smoke test
 
-## Integration in docker-git
-
-Project images should install this repo and configure agent MCP as `browser-connection`:
-
-```dockerfile
-RUN cargo install --git https://github.com/ProverCoderAI/rust-browser-connection.git --bins
+```bash
+printf '%s\n' \
+  '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"probe","version":"0"}}}' \
+  '{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}' \
+  '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}' \
+| browser-connection --project dg-my-project --no-start-browser
 ```
 
-Generated Codex config should contain:
+Expected: server `browser-connection` and tools like `browser_navigate`, `browser_snapshot`, `browser_evaluate`.
 
-```toml
-[mcp_servers.playwright]
-command = "browser-connection"
-args = ["--project", "${PROJECT_ID}"]
-```
+## Notes
 
-Generated Hermes config should contain the YAML equivalent. Old TypeScript browser code and external `npx @playwright/mcp` config paths should not be generated.
-
-## Formal guarantees
-
-- **Invariant**: exactly one browser container per project (`dg-*-browser`).
-- **Invariant**: MCP tools target the configured CDP endpoint; they do not start a second browser.
-- **Invariant**: noVNC and MCP observe/control the same Chromium framebuffer/session.
-- Pure helpers render URLs/specs without Docker.
-- Shell effects are isolated in `src/browser.rs`, `src/cdp.rs`, and `src/mcp.rs` with AGENTS.md-style comments.
+- Container name: `<project>-browser`, e.g. `dg-my-project-browser`.
+- The binary auto-detects Docker via `/var/run/docker.sock` or `tcp://host.docker.internal:2375`.
+- If `container:<project>` network is unavailable, it falls back to bridge mode and prints reachable noVNC/CDP URLs.
+- Invariant: MCP and noVNC operate on the same Chromium session; no second Playwright browser is started.
 
 ## Development
 
 ```bash
-source ~/.cargo/env || true
 cargo fmt --check
 cargo check --locked --bins
 cargo test --locked
 cargo clippy --locked --all-targets -- -D warnings
 ```
-
-Negative verification that the product path does not depend on external Playwright MCP:
-
-```bash
-grep -R '@playwright/mcp\|command = "npx"\|--cdp-endpoint' -n README.md Cargo.toml src tests .github || true
-```
-
-Any match must be either a warning about the old forbidden config or test/documentation text proving it is not used as the runtime command.
