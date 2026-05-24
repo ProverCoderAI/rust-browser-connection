@@ -1,6 +1,6 @@
 [package]
 name = "docker-git-browser-connection"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "Rust module for noVNC + browser connection (single browser for docker-git, MCP and Hermes tools) — per issue #347"
 license = "MIT"
