@@ -27,6 +27,33 @@ docker-git-browser-connection start --project dg-my-project --network container:
 Point your MCP Playwright config to the CDP URL returned above.  
 The same browser instance will be visible in noVNC — **one browser, zero duplication**.
 
+## Короткий гайд: Hermes + MCP Playwright + noVNC
+
+```bash
+# 1. Поднять один browser container для проекта
+docker-git-browser-connection start --project dg-my-project --network container:dg-my-project
+
+# 2. Подключить MCP Playwright в Hermes
+hermes mcp add playwright --command docker-git-playwright-mcp
+
+# 3. Отключить встроенный browser toolset, чтобы не было второй сессии
+hermes tools disable browser
+
+# 4. Перезапустить Hermes или выполнить /reset, затем проверить
+hermes mcp test playwright
+```
+
+Использование: просите Hermes открыть/кликнуть/проверить сайт; он должен вызывать
+`mcp_playwright_browser_*`, а та же вкладка будет видна в noVNC URL из команды
+`start`.
+
+Быстрый health-check:
+
+```bash
+curl http://127.0.0.1:9223/json/version
+open http://127.0.0.1:6080/vnc.html?autoconnect=true\&resize=remote\&path=websockify
+```
+
 ## Integration in docker-git
 
 The Dockerfile does:
