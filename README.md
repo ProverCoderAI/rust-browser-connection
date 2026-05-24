@@ -10,20 +10,49 @@ Solves GitHub issue #347: when using MCP Playwright, it automatically gets noVNC
 # Install
 cargo install --git https://github.com/ProverCoderAI/rust-browser-connection
 
-# Start the single browser for a project
-docker-git-browser-connection start --project my-project
+# Start the single browser for a project.
+# Inside docker-git project containers DOCKER_GIT_PROJECT_DOCKER_HOST is used
+# automatically when /var/run/docker.sock is not mounted.
+docker-git-browser-connection start --project dg-my-project --network container:dg-my-project
 
 # Output:
-# Browser started for project: my-project
+# Browser started for project: dg-my-project
 # Container: dg-my-project-browser
-# noVNC: http://localhost:6080/...
-# CDP (for MCP Playwright / Hermes): http://localhost:9223?project=my-project
+# noVNC: http://127.0.0.1:6080/vnc.html?autoconnect=true&resize=remote&path=websockify
+# CDP (for MCP Playwright / Hermes): http://127.0.0.1:9223
 ```
 
 ## For MCP Playwright
 
 Point your MCP Playwright config to the CDP URL returned above.  
 The same browser instance will be visible in noVNC — **one browser, zero duplication**.
+
+## Короткий гайд: Hermes + MCP Playwright + noVNC
+
+```bash
+# 1. Поднять один browser container для проекта
+docker-git-browser-connection start --project dg-my-project --network container:dg-my-project
+
+# 2. Подключить MCP Playwright в Hermes
+hermes mcp add playwright --command docker-git-playwright-mcp
+
+# 3. Отключить встроенный browser toolset, чтобы не было второй сессии
+hermes tools disable browser
+
+# 4. Перезапустить Hermes или выполнить /reset, затем проверить
+hermes mcp test playwright
+```
+
+Использование: просите Hermes открыть/кликнуть/проверить сайт; он должен вызывать
+`mcp_playwright_browser_*`, а та же вкладка будет видна в noVNC URL из команды
+`start`.
+
+Быстрый health-check:
+
+```bash
+curl http://127.0.0.1:9223/json/version
+open http://127.0.0.1:6080/vnc.html?autoconnect=true\&resize=remote\&path=websockify
+```
 
 ## Integration in docker-git
 

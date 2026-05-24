@@ -1,7 +1,7 @@
 //! CLI entrypoint for docker-git-browser-connection
 //!
 //! Usage (из коробки):
-//!   docker-git-browser-connection start --project myproj [--network my-net]
+//!   docker-git-browser-connection start --project dg-myproj
 //!
 //! This binary is what MCP Playwright / Hermes / docker-git entrypoints invoke
 //! to guarantee a single unified browser (noVNC + CDP).
@@ -10,7 +10,11 @@ use clap::{Parser, Subcommand};
 use docker_git_browser_connection::{BrowserConnection, BrowserInfo};
 
 #[derive(Parser)]
-#[command(name = "docker-git-browser-connection", version, about = "Unified noVNC + CDP browser for docker-git, MCP Playwright and Hermes (per #347)")]
+#[command(
+    name = "docker-git-browser-connection",
+    version,
+    about = "Unified noVNC + CDP browser for docker-git, MCP Playwright and Hermes (per #347)"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -22,7 +26,7 @@ enum Commands {
     Start {
         #[arg(long)]
         project: String,
-        /// Docker network to attach the browser container to (so main container can reach it by name for CDP)
+        /// Docker network mode for the browser container. Defaults to container:<project container>.
         #[arg(long)]
         network: Option<String>,
     },
@@ -33,18 +37,16 @@ enum Commands {
     },
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+fn main() -> anyhow::Result<()> {
     env_logger::init();
 
     let cli = Cli::parse();
-
     let conn = BrowserConnection::new()?;
 
     match cli.command {
         Commands::Start { project, network } => {
             let net_ref = network.as_deref();
-            let info: BrowserInfo = conn.start_browser(&project, net_ref).await?;
+            let info: BrowserInfo = conn.start_browser(&project, net_ref)?;
             println!("Browser started for project: {}", info.project_id);
             println!("Container: {}", info.container_name);
             println!("noVNC: {}", info.novnc_url);
@@ -56,7 +58,10 @@ async fn main() -> anyhow::Result<()> {
             let cdp = conn.get_cdp_url(&project);
             println!("noVNC: {}", novnc);
             println!("CDP: {}", cdp);
-            println!("Invariant check: {}", conn.is_single_browser_session(&cdp, &novnc));
+            println!(
+                "Invariant check: {}",
+                conn.is_single_browser_session(&cdp, &novnc)
+            );
         }
     }
 
