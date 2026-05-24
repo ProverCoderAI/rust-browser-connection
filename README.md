@@ -35,18 +35,25 @@ browser-connection --help
 # automatically when /var/run/docker.sock is not mounted.
 docker-git-browser-connection start --project dg-my-project --network container:dg-my-project
 
-# Output:
+# If dg-my-project does not exist yet, the MCP binary also works standalone:
+# it falls back to Docker bridge mode, publishes deterministic project ports,
+# and returns whichever CDP/noVNC URLs are actually reachable from the caller.
+browser-connection --project dg-my-project
+
+# Example output from the lifecycle CLI:
 # Browser started for project: dg-my-project
 # Container: dg-my-project-browser
-# noVNC: http://127.0.0.1:6080/vnc.html?autoconnect=true&resize=remote&path=websockify
-# CDP (for MCP Playwright / Hermes): http://127.0.0.1:9223
+# noVNC: http://127.0.0.1:6450/vnc.html?autoconnect=true&resize=remote&path=websockify
+# CDP (for MCP Playwright / Hermes): http://127.0.0.1:9593
 ```
 
 Health check:
 
 ```bash
-curl http://127.0.0.1:9223/json/version
-open http://127.0.0.1:6080/vnc.html?autoconnect=true\&resize=remote\&path=websockify
+# Use the CDP/noVNC URLs printed by `start`; in containerized Docker hosts the
+# module may choose the browser container IP instead of 127.0.0.1 host ports.
+curl -H 'Host: 127.0.0.1:9222' http://127.0.0.1:9593/json/version
+open 'http://127.0.0.1:6450/vnc.html?autoconnect=true&resize=remote&path=websockify'
 ```
 
 ## MCP config: use `browser-connection`, not `npx @playwright/mcp`
@@ -119,10 +126,10 @@ Expected output includes:
 Codex/Hermes MCP client
         ↓ command = "browser-connection"
 Rust MCP stdio server from this crate
-        ↓ CDP http://127.0.0.1:9223
+        ↓ resolved CDP URL (127.0.0.1 host port, shared namespace, or Docker bridge IP)
 Rust-managed Chromium container dg-*-browser
         ↓ same framebuffer
-noVNC http://127.0.0.1:6080/vnc.html?autoconnect=true&resize=remote&path=websockify
+resolved noVNC URL (same container/session)
 ```
 
 ## Supported MCP tools

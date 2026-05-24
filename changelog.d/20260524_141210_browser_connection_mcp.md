@@ -7,3 +7,4 @@ bump: minor
 
 ### Changed
 - Documented `command = "browser-connection"` as the supported product path and made the old external Playwright MCP command shape a forbidden runtime configuration.
+- Pinned CLI/test dependency ranges and regenerated `Cargo.lock` with lockfile format v3 so `cargo install --locked` also works on Cargo 1.75 environments.
