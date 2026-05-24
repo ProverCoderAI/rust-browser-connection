@@ -44,12 +44,78 @@ pub struct BrowserInfo {
     pub cdp_url: String,
 }
 
-fn env_or(name: &str, fallback: String) -> String {
-    env::var(name)
-        .ok()
+fn resolved_or<F>(resolve: &F, name: &str, fallback: String) -> String
+where
+    F: Fn(&str) -> Option<String>,
+{
+    resolve(name)
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
         .unwrap_or(fallback)
+}
+
+fn env_value(name: &str) -> Option<String> {
+    env::var(name).ok()
+}
+
+// CHANGE: split BrowserSpec construction from process environment reads.
+// WHY: tests and downstream callers need deterministic default specs even when DOCKER_GIT_* env vars exist.
+// QUOTE(ТЗ): "чистый Rust-only модуль, без дублей и с формальными инвариантами"
+// REF: issue-347, CodeRabbit review 3294618472
+// SOURCE: n/a
+// FORMAT THEOREM: resolver = ∅ -> spec(project_id) is deterministic and Docker-free.
+// PURITY: CORE
+// INVARIANT: BrowserSpec default derivation is independent from ambient CI/developer env unless browser_spec_from_env is used.
+// COMPLEXITY: O(n)/O(n), n = total resolved string length.
+fn browser_spec_from_resolver<F>(project_id: &str, network: Option<&str>, resolve: F) -> BrowserSpec
+where
+    F: Fn(&str) -> Option<String>,
+{
+    let project = project_id.trim();
+    let project = if project.is_empty() {
+        "default"
+    } else {
+        project
+    };
+    let normalized_container = normalize_project_container_name(project);
+    let main_container_name = resolved_or(
+        &resolve,
+        "DOCKER_GIT_PROJECT_CONTAINER_NAME",
+        normalized_container,
+    );
+    let container_name = resolved_or(
+        &resolve,
+        "DOCKER_GIT_BROWSER_CONTAINER_NAME",
+        format!("{}-browser", main_container_name),
+    );
+    let image_name = resolved_or(
+        &resolve,
+        "DOCKER_GIT_BROWSER_IMAGE_NAME",
+        format!("{}:docker-git-browser", container_name),
+    );
+    let volume_name = resolved_or(
+        &resolve,
+        "DOCKER_GIT_BROWSER_VOLUME_NAME",
+        format!("{}-data", container_name),
+    );
+    let network_mode = network
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("container:{}", main_container_name));
+
+    BrowserSpec {
+        project_id: project.to_string(),
+        main_container_name,
+        container_name,
+        image_name,
+        volume_name,
+        network_mode,
+    }
+}
+
+pub fn browser_spec_from_defaults(project_id: &str, network: Option<&str>) -> BrowserSpec {
+    browser_spec_from_resolver(project_id, network, |_| None)
 }
 
 // CHANGE: normalize external project ids to docker-git's concrete container namespace.
@@ -85,40 +151,7 @@ pub fn normalize_project_container_name(project_id: &str) -> String {
 // INVARIANT: BrowserSpec has non-empty Docker object names and exactly one browser container name.
 // COMPLEXITY: O(n)/O(n), n = total env string length.
 pub fn browser_spec_from_env(project_id: &str, network: Option<&str>) -> BrowserSpec {
-    let project = project_id.trim();
-    let project = if project.is_empty() {
-        "default"
-    } else {
-        project
-    };
-    let normalized_container = normalize_project_container_name(project);
-    let main_container_name = env_or("DOCKER_GIT_PROJECT_CONTAINER_NAME", normalized_container);
-    let container_name = env_or(
-        "DOCKER_GIT_BROWSER_CONTAINER_NAME",
-        format!("{}-browser", main_container_name),
-    );
-    let image_name = env_or(
-        "DOCKER_GIT_BROWSER_IMAGE_NAME",
-        format!("{}:docker-git-browser", container_name),
-    );
-    let volume_name = env_or(
-        "DOCKER_GIT_BROWSER_VOLUME_NAME",
-        format!("{}-data", container_name),
-    );
-    let network_mode = network
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_string)
-        .unwrap_or_else(|| format!("container:{}", main_container_name));
-
-    BrowserSpec {
-        project_id: project.to_string(),
-        main_container_name,
-        container_name,
-        image_name,
-        volume_name,
-        network_mode,
-    }
+    browser_spec_from_resolver(project_id, network, env_value)
 }
 
 pub fn render_novnc_url() -> String {
@@ -186,7 +219,7 @@ mod tests {
 
     #[test]
     fn default_spec_uses_normalized_project_container_namespace() {
-        let spec = browser_spec_from_env("docker-git-issue-347", None);
+        let spec = browser_spec_from_defaults("docker-git-issue-347", None);
         assert_eq!(spec.project_id, "docker-git-issue-347");
         assert_eq!(spec.main_container_name, "dg-docker-git-issue-347");
         assert_eq!(spec.container_name, "dg-docker-git-issue-347-browser");

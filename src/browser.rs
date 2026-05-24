@@ -265,6 +265,7 @@ fn cdp_probe_candidates(spec: &BrowserSpec) -> Vec<String> {
 // INVARIANT: success proves the CDP endpoint for spec.container_name is answering /json/version.
 // COMPLEXITY: O(a*b), a = attempts, b = candidate endpoints.
 fn wait_for_cdp(spec: &BrowserSpec) -> Result<()> {
+    ensure_curl_available()?;
     let mut last_candidates = Vec::new();
     for _ in 0..60 {
         last_candidates = cdp_probe_candidates(spec);
@@ -293,6 +294,33 @@ fn wait_for_cdp(spec: &BrowserSpec) -> Result<()> {
         "browser CDP endpoint did not become ready; tried: {}",
         last_candidates.join(", ")
     ))
+}
+
+// CHANGE: fail fast when the host shell lacks curl for CDP readiness checks.
+// WHY: otherwise a missing binary is indistinguishable from a slow browser and produces a misleading timeout.
+// QUOTE(ТЗ): "добиться что бы всё работало и этому были доказательства"
+// REF: issue-347, CodeRabbit review 3294618470
+// SOURCE: n/a
+// FORMAT THEOREM: ¬exists(curl) -> wait_for_cdp errors before network polling.
+// PURITY: SHELL
+// EFFECT: executes `curl --version` to validate the external probe dependency.
+// INVARIANT: CDP timeout errors now only represent attempted network probes, not missing curl.
+// COMPLEXITY: O(1)
+fn ensure_curl_available() -> Result<()> {
+    let status = Command::new("curl")
+        .arg("--version")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .context("curl is required for CDP readiness probing but was not found")?;
+
+    if !status.success() {
+        return Err(anyhow!(
+            "curl is required for CDP readiness probing but exited with status {status}"
+        ));
+    }
+
+    Ok(())
 }
 
 fn inspect_container_ip(container_name: &str) -> Result<Option<String>> {
