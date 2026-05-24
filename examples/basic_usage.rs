@@ -1,7 +1,8 @@
-use example_sum_package_name::sum;
+use docker_git_browser_connection::{browser_spec_from_env, render_cdp_url, render_novnc_url};
 
 fn main() {
-    println!("2 + 3 = {}", sum(2, 3));
-    println!("-5 + 10 = {}", sum(-5, 10));
-    println!("1000 + 2000 = {}", sum(1000, 2000));
+    let spec = browser_spec_from_env("dg-example", None);
+    println!("container={}", spec.container_name);
+    println!("noVNC={}", render_novnc_url());
+    println!("CDP={}", render_cdp_url());
 }

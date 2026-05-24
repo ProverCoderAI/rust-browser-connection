@@ -1,23 +1,39 @@
 /*! BrowserConnection — formally verifiable unified browser module for docker-git
 //!
-//! Provides single browser session (noVNC + CDP) for MCP Playwright and Hermes.
-//! CORE: pure URL generation + invariant check
-//! SHELL: DockerBrowserShell (bollard)
+//! Provides one browser session (noVNC + CDP) for MCP Playwright and Hermes.
+//! CORE: pure URL/name/env resolution + invariant checks.
+//! SHELL: DockerBrowserShell in `browser.rs`.
 //!
-//! CHANGE: per-project host ports via pure deterministic hash
+//! CHANGE: separate pure BrowserSpec from Docker side effects.
+//! WHY: issue #347 requires a reusable Rust-only module that docker-git can install and call.
+//! QUOTE(ТЗ): "Вынести noVNC + MCP Playright в единый модуль."
+//! REF: https://github.com/ProverCoderAI/docker-git/issues/347
+//! SOURCE: n/a
+//! FORMAT THEOREM: forall p: ProjectId, spec(p).container = normalize(p) + "-browser" unless env overrides it
+//! PURITY: CORE
+//! INVARIANT: pure helpers never require Docker and are deterministic for the same inputs.
 */
 
 mod browser;
 
-use anyhow::Result;
 use crate::browser::DockerBrowserShell;
+use anyhow::Result;
 use serde::Serialize;
+use std::env;
 
-/// Pure deterministic port allocator (prevents collisions between projects)
-pub fn compute_browser_ports(project_id: &str) -> (u16, u16, u16) {
-    let hash: u32 = project_id.bytes().fold(0u32, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u32));
-    let offset = (hash % 400) as u16;
-    (5900 + offset, 6080 + offset, 9223 + offset)
+pub const BROWSER_VNC_PORT: u16 = 5900;
+pub const BROWSER_NOVNC_PORT: u16 = 6080;
+pub const BROWSER_CDP_PORT: u16 = 9223;
+const DOCKER_GIT_CONTAINER_PREFIX: &str = "dg-";
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct BrowserSpec {
+    pub project_id: String,
+    pub main_container_name: String,
+    pub container_name: String,
+    pub image_name: String,
+    pub volume_name: String,
+    pub network_mode: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -28,40 +44,130 @@ pub struct BrowserInfo {
     pub cdp_url: String,
 }
 
+fn env_or(name: &str, fallback: String) -> String {
+    env::var(name)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or(fallback)
+}
+
+// CHANGE: normalize external project ids to docker-git's concrete container namespace.
+// WHY: issue #347 proof names the logical project as "docker-git-issue-347" while Docker resources are `dg-docker-git-issue-347-*`.
+// QUOTE(ТЗ): "релевантный контейнер: dg-docker-git-issue-347-browser"
+// REF: issue-347
+// SOURCE: n/a
+// FORMAT THEOREM: ∀p ∈ ProjectId: normalize(p).starts_with("dg-") ∧ normalize(normalize(p)) = normalize(p)
+// PURITY: CORE
+// INVARIANT: project ids are idempotently mapped to the single docker-git namespace.
+// COMPLEXITY: O(n)/O(n), n = |project_id|.
+pub fn normalize_project_container_name(project_id: &str) -> String {
+    let project = project_id.trim();
+    let project = if project.is_empty() {
+        "default"
+    } else {
+        project
+    };
+    if project.starts_with(DOCKER_GIT_CONTAINER_PREFIX) {
+        project.to_string()
+    } else {
+        format!("{DOCKER_GIT_CONTAINER_PREFIX}{project}")
+    }
+}
+
+// CHANGE: derive Docker runtime names from docker-git env first, then from normalized project id.
+// WHY: docker-git already writes DOCKER_GIT_BROWSER_* env into compose; respecting it prevents name drift.
+// QUOTE(ТЗ): "браузер поднимается внутри докера"
+// REF: issue-347
+// SOURCE: n/a
+// FORMAT THEOREM: env.container_name != empty -> spec.container_name = env.container_name
+// PURITY: CORE (except environment boundary read isolated in this constructor)
+// INVARIANT: BrowserSpec has non-empty Docker object names and exactly one browser container name.
+// COMPLEXITY: O(n)/O(n), n = total env string length.
+pub fn browser_spec_from_env(project_id: &str, network: Option<&str>) -> BrowserSpec {
+    let project = project_id.trim();
+    let project = if project.is_empty() {
+        "default"
+    } else {
+        project
+    };
+    let normalized_container = normalize_project_container_name(project);
+    let main_container_name = env_or("DOCKER_GIT_PROJECT_CONTAINER_NAME", normalized_container);
+    let container_name = env_or(
+        "DOCKER_GIT_BROWSER_CONTAINER_NAME",
+        format!("{}-browser", main_container_name),
+    );
+    let image_name = env_or(
+        "DOCKER_GIT_BROWSER_IMAGE_NAME",
+        format!("{}:docker-git-browser", container_name),
+    );
+    let volume_name = env_or(
+        "DOCKER_GIT_BROWSER_VOLUME_NAME",
+        format!("{}-data", container_name),
+    );
+    let network_mode = network
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("container:{}", main_container_name));
+
+    BrowserSpec {
+        project_id: project.to_string(),
+        main_container_name,
+        container_name,
+        image_name,
+        volume_name,
+        network_mode,
+    }
+}
+
+pub fn render_novnc_url() -> String {
+    format!(
+        "http://127.0.0.1:{}/vnc.html?autoconnect=true&resize=remote&path=websockify",
+        BROWSER_NOVNC_PORT
+    )
+}
+
+pub fn render_cdp_url() -> String {
+    format!("http://127.0.0.1:{}", BROWSER_CDP_PORT)
+}
+
+pub fn is_single_browser_session(cdp_url: &str, novnc_url: &str) -> bool {
+    novnc_url.contains("/vnc.html") && cdp_url == render_cdp_url()
+}
+
 pub struct BrowserConnection {
     shell: DockerBrowserShell,
 }
 
 impl BrowserConnection {
     pub fn new() -> Result<Self> {
-        let shell = DockerBrowserShell::new()?;
+        let shell = DockerBrowserShell::new();
         Ok(Self { shell })
     }
 
-    pub async fn start_browser(&self, project_id: &str, network: Option<&str>) -> Result<BrowserInfo> {
-        let container_name = self.shell.ensure_browser_container(project_id, network).await?;
-        let (_, novnc_p, cdp_p) = compute_browser_ports(project_id);
+    pub fn start_browser(&self, project_id: &str, network: Option<&str>) -> Result<BrowserInfo> {
+        let spec = browser_spec_from_env(project_id, network);
+        let container_name = self.shell.ensure_browser_container(&spec)?;
 
         Ok(BrowserInfo {
-            project_id: project_id.to_string(),
+            project_id: spec.project_id,
             container_name,
-            novnc_url: format!("http://localhost:{}/vnc.html?autoconnect=true&resize=remote&path=websockify?token={}", novnc_p, project_id),
-            cdp_url: format!("http://localhost:{}", cdp_p),
+            novnc_url: render_novnc_url(),
+            cdp_url: render_cdp_url(),
         })
     }
 
-    pub fn get_novnc_url(&self, project_id: &str) -> String {
-        let (_, novnc_port, _) = compute_browser_ports(project_id);
-        format!("http://localhost:{}/vnc.html?autoconnect=true&resize=remote&path=websockify?token={}", novnc_port, project_id)
+    pub fn get_novnc_url(&self, _project_id: &str) -> String {
+        render_novnc_url()
     }
 
-    pub fn get_cdp_url(&self, project_id: &str) -> String {
-        let (_, _, cdp_port) = compute_browser_ports(project_id);
-        format!("http://localhost:{}", cdp_port)
+    pub fn get_cdp_url(&self, _project_id: &str) -> String {
+        render_cdp_url()
     }
 
     pub fn is_single_browser_session(&self, cdp_url: &str, novnc_url: &str) -> bool {
-        novnc_url.contains("vnc.html") && cdp_url.starts_with("http://localhost:")
+        is_single_browser_session(cdp_url, novnc_url)
     }
 }
 
@@ -70,13 +176,24 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_url_pure_functions() {
-        let conn = BrowserConnection::new().unwrap();
-        let novnc = conn.get_novnc_url("proj42");
-        let cdp = conn.get_cdp_url("proj42");
-        assert!(conn.is_single_browser_session(&cdp, &novnc));
-        let p1 = compute_browser_ports("foo");
-        let p2 = compute_browser_ports("bar");
-        assert_ne!(p1, p2);
+    fn pure_urls_do_not_require_docker() {
+        let novnc = render_novnc_url();
+        let cdp = render_cdp_url();
+        assert_eq!(cdp, "http://127.0.0.1:9223");
+        assert!(novnc.contains("/vnc.html"));
+        assert!(is_single_browser_session(&cdp, &novnc));
+    }
+
+    #[test]
+    fn default_spec_uses_normalized_project_container_namespace() {
+        let spec = browser_spec_from_env("docker-git-issue-347", None);
+        assert_eq!(spec.project_id, "docker-git-issue-347");
+        assert_eq!(spec.main_container_name, "dg-docker-git-issue-347");
+        assert_eq!(spec.container_name, "dg-docker-git-issue-347-browser");
+        assert_eq!(
+            spec.image_name,
+            "dg-docker-git-issue-347-browser:docker-git-browser"
+        );
+        assert_eq!(spec.network_mode, "container:dg-docker-git-issue-347");
     }
 }
