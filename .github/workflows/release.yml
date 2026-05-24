@@ -323,12 +323,24 @@ jobs:
       - name: Configure git
         run: rust-script scripts/git-config.rs
 
+      - name: Resolve Crates.io publish credentials
+        id: release-token
+        run: |
+          if [ -n "$CARGO_REGISTRY_TOKEN" ] || [ -n "$CARGO_TOKEN" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::Skipping automatic release because neither CARGO_REGISTRY_TOKEN nor CARGO_TOKEN is configured"
+          fi
+
       - name: Determine bump type from changelog fragments
         id: bump_type
+        if: steps.release-token.outputs.enabled == 'true'
         run: rust-script scripts/get-bump-type.rs
 
       - name: Check if version already released or no fragments
         id: check
+        if: steps.release-token.outputs.enabled == 'true'
         env:
           HAS_FRAGMENTS: ${{ steps.bump_type.outputs.has_fragments }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -336,18 +348,18 @@ jobs:
 
       - name: Collect changelog and bump version
         id: version
-        if: steps.check.outputs.should_release == 'true' && steps.check.outputs.skip_bump != 'true'
+        if: steps.release-token.outputs.enabled == 'true' && steps.check.outputs.should_release == 'true' && steps.check.outputs.skip_bump != 'true'
         run: |
           rust-script scripts/version-and-commit.rs \
             --bump-type "${{ steps.bump_type.outputs.bump_type }}"
 
       - name: Get current version
         id: current_version
-        if: steps.check.outputs.should_release == 'true'
+        if: steps.release-token.outputs.enabled == 'true' && steps.check.outputs.should_release == 'true'
         run: rust-script scripts/get-version.rs
 
       - name: Build release
-        if: steps.check.outputs.should_release == 'true'
+        if: steps.release-token.outputs.enabled == 'true' && steps.check.outputs.should_release == 'true'
         run: cargo build --release
 
       - name: Publish to Crates.io
