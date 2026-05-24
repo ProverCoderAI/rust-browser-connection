@@ -15,6 +15,8 @@
 */
 
 mod browser;
+pub mod cdp;
+pub mod mcp;
 
 use crate::browser::DockerBrowserShell;
 use anyhow::Result;
