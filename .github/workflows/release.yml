@@ -351,15 +351,20 @@ jobs:
         run: cargo build --release
 
       - name: Publish to Crates.io
-        if: steps.check.outputs.should_release == 'true' && steps.check.outputs.crate_published != 'true'
+        if: steps.check.outputs.should_release == 'true' && steps.check.outputs.crate_published != 'true' && (env.CARGO_REGISTRY_TOKEN != '' || env.CARGO_TOKEN != '')
         id: publish-crate
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN || secrets.CARGO_TOKEN }}
           CARGO_TOKEN: ${{ secrets.CARGO_TOKEN }}
         run: rust-script scripts/publish-crate.rs
 
+      - name: Skip Crates.io publish without token
+        if: steps.check.outputs.should_release == 'true' && steps.check.outputs.crate_published != 'true' && env.CARGO_REGISTRY_TOKEN == '' && env.CARGO_TOKEN == ''
+        run: |
+          echo "::warning::Skipping crates.io publish because neither CARGO_REGISTRY_TOKEN nor CARGO_TOKEN is configured"
+
       - name: Wait for Crate availability on Crates.io
-        if: steps.check.outputs.should_release == 'true'
+        if: steps.check.outputs.should_release == 'true' && (steps.check.outputs.crate_published == 'true' || steps.publish-crate.outcome == 'success')
         run: rust-script scripts/wait-for-crate.rs --release-version "${{ steps.current_version.outputs.version }}"
 
       - name: Configure Docker Hub publishing
@@ -423,7 +428,7 @@ jobs:
           labels: ${{ steps.docker-meta.outputs.labels }}
 
       - name: Create GitHub Release
-        if: steps.check.outputs.should_release == 'true'
+        if: steps.check.outputs.should_release == 'true' && (steps.check.outputs.crate_published == 'true' || steps.publish-crate.outcome == 'success')
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           DOCKER_HUB_URL: ${{ steps.dockerhub.outputs.docker_hub_url }}
@@ -492,15 +497,20 @@ jobs:
         run: cargo build --release
 
       - name: Publish to Crates.io
-        if: steps.version.outputs.version_committed == 'true' || steps.version.outputs.already_released == 'true'
+        if: (steps.version.outputs.version_committed == 'true' || steps.version.outputs.already_released == 'true') && (env.CARGO_REGISTRY_TOKEN != '' || env.CARGO_TOKEN != '')
         id: publish-crate
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN || secrets.CARGO_TOKEN }}
           CARGO_TOKEN: ${{ secrets.CARGO_TOKEN }}
         run: rust-script scripts/publish-crate.rs
 
+      - name: Skip Crates.io publish without token
+        if: (steps.version.outputs.version_committed == 'true' || steps.version.outputs.already_released == 'true') && env.CARGO_REGISTRY_TOKEN == '' && env.CARGO_TOKEN == ''
+        run: |
+          echo "::warning::Skipping crates.io publish because neither CARGO_REGISTRY_TOKEN nor CARGO_TOKEN is configured"
+
       - name: Wait for Crate availability on Crates.io
-        if: steps.version.outputs.version_committed == 'true' || steps.version.outputs.already_released == 'true'
+        if: (steps.version.outputs.version_committed == 'true' || steps.version.outputs.already_released == 'true') && steps.publish-crate.outcome == 'success'
         run: rust-script scripts/wait-for-crate.rs --release-version "${{ steps.version.outputs.new_version }}"
 
       - name: Configure Docker Hub publishing
@@ -564,7 +574,7 @@ jobs:
           labels: ${{ steps.docker-meta.outputs.labels }}
 
       - name: Create GitHub Release
-        if: steps.version.outputs.version_committed == 'true' || steps.version.outputs.already_released == 'true'
+        if: (steps.version.outputs.version_committed == 'true' || steps.version.outputs.already_released == 'true') && steps.publish-crate.outcome == 'success'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           DOCKER_HUB_URL: ${{ steps.dockerhub.outputs.docker_hub_url }}
@@ -664,17 +674,36 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Check GitHub Pages configuration
+        id: pages
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          if curl -fsS \
+            -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/pages" >/dev/null; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::Skipping docs deploy because GitHub Pages is not enabled for GitHub Actions"
+          fi
+
       - name: Build documentation
+        if: steps.pages.outputs.enabled == 'true'
         run: cargo doc --no-deps --all-features
 
       - name: Configure GitHub Pages
+        if: steps.pages.outputs.enabled == 'true'
         uses: actions/configure-pages@v6
 
       - name: Upload GitHub Pages artifact
+        if: steps.pages.outputs.enabled == 'true'
         uses: actions/upload-pages-artifact@v5
         with:
           path: target/doc
 
       - name: Deploy to GitHub Pages
+        if: steps.pages.outputs.enabled == 'true'
         id: deployment
         uses: actions/deploy-pages@v5
