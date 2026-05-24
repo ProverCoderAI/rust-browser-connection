@@ -16,9 +16,10 @@ INVARIANT: repeated ensure_browser_container(spec) reuses exactly spec.container
 
 use anyhow::{anyhow, Context, Result};
 use std::fs;
+use std::net::{TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::BrowserSpec;
 
@@ -162,27 +163,79 @@ fn docker_output(output: std::process::Output, label: &str) -> Result<String> {
     ))
 }
 
-// CHANGE: route Docker CLI through docker-git's configured host daemon when present.
-// WHY: generated docker-git project containers expose Docker via DOCKER_GIT_PROJECT_DOCKER_HOST,
-//      not necessarily via /var/run/docker.sock; the Rust module must work out-of-the-box there.
-// QUOTE(ТЗ): "к агенту подключить возможность работать с нашим браузером который запущен в докере"
+const HOST_DOCKER_INTERNAL_DOCKER_HOST: &str = "tcp://host.docker.internal:2375";
+
+// CHANGE: route Docker CLI through docker-git's configured or discoverable host daemon.
+// WHY: MCP clients may scrub DOCKER_HOST from stdio server environments, while generated docker-git
+//      containers still expose Docker through host.docker.internal:2375 rather than /var/run/docker.sock.
+// QUOTE(ТЗ): "а почему он сам не находит эту ссылку?"
 // REF: https://github.com/ProverCoderAI/docker-git/issues/347
 // SOURCE: n/a
-// FORMAT THEOREM: DOCKER_HOST ∨ DOCKER_GIT_PROJECT_DOCKER_HOST -> docker_cli_can_reach_daemon
+// FORMAT THEOREM: explicit(DOCKER_HOST) ∨ project_env ∨ unix_socket ∨ host_internal_tcp -> docker_cli_can_reach_daemon
 // PURITY: SHELL
-// EFFECT: configures a child process environment only.
-// INVARIANT: an explicit DOCKER_HOST always wins over docker-git's fallback variable.
-// COMPLEXITY: O(n)/O(n), n = env string length.
+// EFFECT: may probe host.docker.internal:2375 and configures a child process environment only.
+// INVARIANT: explicit DOCKER_HOST is never overridden; project-scoped fallback wins over autodetection.
+// COMPLEXITY: O(a)/O(a), a = number of resolved host.docker.internal addresses.
 fn docker_command() -> Command {
     let mut command = Command::new("docker");
-    if std::env::var_os("DOCKER_HOST").is_none() {
-        if let Some(host) = std::env::var_os("DOCKER_GIT_PROJECT_DOCKER_HOST") {
-            if !host.is_empty() {
-                command.env("DOCKER_HOST", host);
-            }
-        }
+    if let Some(host) = docker_host_override() {
+        command.env("DOCKER_HOST", host);
     }
     command
+}
+
+fn docker_host_override() -> Option<String> {
+    selected_docker_host_override(
+        nonempty_env("DOCKER_HOST").as_deref(),
+        nonempty_env("DOCKER_GIT_PROJECT_DOCKER_HOST").as_deref(),
+        Path::new("/var/run/docker.sock").exists(),
+        host_docker_internal_docker_api_available(),
+    )
+}
+
+fn nonempty_env(name: &str) -> Option<String> {
+    std::env::var(name)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn selected_docker_host_override(
+    docker_host: Option<&str>,
+    docker_git_project_docker_host: Option<&str>,
+    unix_socket_exists: bool,
+    host_docker_internal_available: bool,
+) -> Option<String> {
+    if docker_host.is_some_and(|host| !host.trim().is_empty()) {
+        return None;
+    }
+
+    if let Some(host) = docker_git_project_docker_host
+        .map(str::trim)
+        .filter(|host| !host.is_empty())
+    {
+        return Some(host.to_string());
+    }
+
+    if unix_socket_exists {
+        return None;
+    }
+
+    if host_docker_internal_available {
+        return Some(HOST_DOCKER_INTERNAL_DOCKER_HOST.to_string());
+    }
+
+    None
+}
+
+fn host_docker_internal_docker_api_available() -> bool {
+    let Ok(addrs) = ("host.docker.internal", 2375).to_socket_addrs() else {
+        return false;
+    };
+
+    addrs
+        .into_iter()
+        .any(|addr| TcpStream::connect_timeout(&addr, Duration::from_millis(150)).is_ok())
 }
 
 fn ensure_docker_available() -> Result<()> {
@@ -584,5 +637,35 @@ mod tests {
             "container:dg-project"
         );
         assert_eq!(effective_network_mode("bridge", None), "bridge");
+    }
+
+    #[test]
+    fn docker_host_autodetect_keeps_explicit_env_and_project_env_precedence() {
+        assert_eq!(
+            selected_docker_host_override(
+                Some("tcp://explicit.example:2375"),
+                Some("tcp://project.example:2375"),
+                false,
+                true,
+            ),
+            None
+        );
+        assert_eq!(
+            selected_docker_host_override(None, Some("tcp://project.example:2375"), false, true),
+            Some("tcp://project.example:2375".to_string())
+        );
+    }
+
+    #[test]
+    fn docker_host_autodetect_falls_back_to_host_docker_internal_when_socket_missing() {
+        assert_eq!(
+            selected_docker_host_override(None, None, false, true),
+            Some("tcp://host.docker.internal:2375".to_string())
+        );
+        assert_eq!(selected_docker_host_override(None, None, true, true), None);
+        assert_eq!(
+            selected_docker_host_override(None, None, false, false),
+            None
+        );
     }
 }
