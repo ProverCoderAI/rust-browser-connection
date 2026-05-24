@@ -14,7 +14,7 @@ INVARIANT: no tool starts a second browser; every command targets the configured
 use anyhow::{anyhow, Context, Result};
 use serde_json::{json, Value};
 use std::process::{Command, Stdio};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tungstenite::{connect, Message};
 
 #[derive(Debug, Clone)]
@@ -36,7 +36,44 @@ impl CdpClient {
     pub fn navigate(&self, url: &str) -> Result<String> {
         require_non_empty(url, "url")?;
         self.command("Page.navigate", json!({ "url": url }))?;
+        self.wait_for_navigation_ready()?;
         Ok(format!("Navigated to {url}"))
+    }
+
+    // CHANGE: wait for browser_navigate to leave the page in a DOM-readable state.
+    // WHY: MCP clients commonly call browser_evaluate immediately after navigate; without this wait,
+    //      Runtime.evaluate can race while document.body is still null and produce flaky smoke failures.
+    // QUOTE(ТЗ): "проверил работате ли поднятие MCP Playright вместе с noVNC протоколом"
+    // REF: proc_47c63ffc3276 JSONDecodeError after browser_evaluate saw document.body == null
+    // SOURCE: Chrome DevTools Protocol Runtime.evaluate + document.readyState
+    // FORMAT THEOREM: navigate(url) returns Ok -> document.body exists ∧ readyState ∈ {interactive, complete}
+    // PURITY: SHELL
+    // EFFECT: polls CDP Runtime.evaluate for up to 10 seconds after Page.navigate.
+    // INVARIANT: no additional browser is started; polling uses the same CDP endpoint and page target.
+    fn wait_for_navigation_ready(&self) -> Result<()> {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut last_error = None;
+        let mut last_status = Value::Null;
+
+        while Instant::now() < deadline {
+            match self.evaluate_value(NAVIGATION_READY_EXPRESSION) {
+                Ok(status) => {
+                    if navigation_ready(&status) {
+                        return Ok(());
+                    }
+                    last_status = status;
+                }
+                Err(error) => {
+                    last_error = Some(error.to_string());
+                }
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+
+        Err(anyhow!(
+            "page did not become DOM-ready after navigation; last status: {last_status}; last error: {}",
+            last_error.unwrap_or_else(|| "none".to_string())
+        ))
     }
 
     pub fn evaluate(&self, expression: &str) -> Result<String> {
@@ -235,6 +272,23 @@ impl CdpClient {
     }
 }
 
+const NAVIGATION_READY_EXPRESSION: &str = r#"(() => ({
+    readyState: document.readyState,
+    hasBody: document.body !== null
+}))()"#;
+
+fn navigation_ready(status: &Value) -> bool {
+    let ready_state = status
+        .get("readyState")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let has_body = status
+        .get("hasBody")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    has_body && matches!(ready_state, "interactive" | "complete")
+}
+
 fn page_target_websocket_url(target: &Value) -> Option<&str> {
     let target_type = target.get("type").and_then(Value::as_str)?;
     if target_type != "page" {
@@ -322,7 +376,24 @@ fn require_non_empty(value: &str, name: &str) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::rewrite_websocket_url;
+    use super::{navigation_ready, rewrite_websocket_url};
+    use serde_json::json;
+
+    #[test]
+    fn navigation_ready_requires_loaded_document_body() {
+        assert!(!navigation_ready(
+            &json!({ "readyState": "loading", "hasBody": false })
+        ));
+        assert!(!navigation_ready(
+            &json!({ "readyState": "complete", "hasBody": false })
+        ));
+        assert!(navigation_ready(
+            &json!({ "readyState": "interactive", "hasBody": true })
+        ));
+        assert!(navigation_ready(
+            &json!({ "readyState": "complete", "hasBody": true })
+        ));
+    }
 
     #[test]
     fn rewrites_chrome_9222_websocket_to_stable_9223_endpoint() {
