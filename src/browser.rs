@@ -22,6 +22,12 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::BrowserSpec;
 
+pub(crate) struct BrowserRuntime {
+    pub container_name: String,
+    pub novnc_url: String,
+    pub cdp_url: String,
+}
+
 const BROWSER_DOCKERFILE: &str = r#"FROM kechangdev/browser-vnc:latest
 
 # bash/procps keep upstream startup scripts compatible; socat exposes a stable CDP port.
@@ -82,23 +88,43 @@ impl DockerBrowserShell {
         Self
     }
 
-    pub fn ensure_browser_container(&self, spec: &BrowserSpec) -> Result<String> {
+    pub fn ensure_browser_container(&self, spec: &BrowserSpec) -> Result<BrowserRuntime> {
         ensure_docker_available()?;
         ensure_browser_image(spec)?;
 
         let state = inspect_container_state(&spec.container_name)?;
         match state.as_deref() {
-            Some("running") => return Ok(spec.container_name.clone()),
+            Some("running") => {
+                let mut runtime_spec = spec.clone();
+                runtime_spec.network_mode = inspect_container_network_mode(&spec.container_name)?
+                    .unwrap_or_else(|| spec.network_mode.clone());
+                let (cdp_url, novnc_url) = runtime_urls(&runtime_spec)?;
+                return Ok(BrowserRuntime {
+                    container_name: spec.container_name.clone(),
+                    novnc_url,
+                    cdp_url,
+                });
+            }
             Some(_) => {
                 docker(["rm", "-f", &spec.container_name], "docker rm browser")?;
             }
             None => {}
         }
 
-        ensure_volume(&spec.volume_name)?;
-        run_browser_container(spec)?;
-        wait_for_cdp(spec)?;
-        Ok(spec.container_name.clone())
+        let mut runtime_spec = spec.clone();
+        runtime_spec.network_mode = effective_network_mode(
+            &spec.network_mode,
+            referenced_container_state(&spec.network_mode)?.as_deref(),
+        );
+
+        ensure_volume(&runtime_spec.volume_name)?;
+        run_browser_container(&runtime_spec)?;
+        let (cdp_url, novnc_url) = runtime_urls(&runtime_spec)?;
+        Ok(BrowserRuntime {
+            container_name: runtime_spec.container_name,
+            novnc_url,
+            cdp_url,
+        })
     }
 }
 
@@ -110,6 +136,21 @@ fn docker<const N: usize>(args: [&str; N], label: &str) -> Result<String> {
         .output()
         .with_context(|| format!("failed to execute {label}"))?;
 
+    docker_output(output, label)
+}
+
+fn docker_dynamic(args: &[String], label: &str) -> Result<String> {
+    let output = docker_command()
+        .args(args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .with_context(|| format!("failed to execute {label}"))?;
+
+    docker_output(output, label)
+}
+
+fn docker_output(output: std::process::Output, label: &str) -> Result<String> {
     if output.status.success() {
         return Ok(String::from_utf8_lossy(&output.stdout).to_string());
     }
@@ -165,6 +206,59 @@ fn inspect_container_state(container_name: &str) -> Result<Option<String>> {
     ))
 }
 
+fn inspect_container_network_mode(container_name: &str) -> Result<Option<String>> {
+    let output = docker_command()
+        .args([
+            "inspect",
+            "-f",
+            "{{.HostConfig.NetworkMode}}",
+            container_name,
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+        .with_context(|| format!("failed to inspect browser network mode for {container_name}"))?;
+
+    if !output.status.success() {
+        return Ok(None);
+    }
+
+    let network_mode = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if network_mode.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(network_mode))
+    }
+}
+
+// CHANGE: avoid `docker run --network container:<missing>` hard failure by falling back to bridge.
+// WHY: MCP stdio startup must work when launched before/without a docker-git project container.
+// QUOTE(ТЗ): "добить задачу ... поднятие MCP Playright вместе с noVNC"
+// REF: user report: Docker status 125, "No such container: dg-my-project"
+// SOURCE: n/a
+// FORMAT THEOREM: container:<name> ∧ state(name) != running -> bridge; otherwise preserve requested network.
+// PURITY: CORE
+// INVARIANT: explicit usable container namespace is kept; unusable default namespace cannot abort startup.
+// COMPLEXITY: O(n)/O(n), n = |network_mode|.
+fn effective_network_mode(network_mode: &str, referenced_state: Option<&str>) -> String {
+    if network_mode.starts_with("container:") && referenced_state != Some("running") {
+        "bridge".to_string()
+    } else {
+        network_mode.to_string()
+    }
+}
+
+fn referenced_container_state(network_mode: &str) -> Result<Option<String>> {
+    match network_mode.strip_prefix("container:") {
+        Some(container_name) => inspect_container_state(container_name),
+        None => Ok(None),
+    }
+}
+
+fn should_publish_ports(network_mode: &str) -> bool {
+    !network_mode.starts_with("container:") && network_mode != "host"
+}
+
 fn image_exists(image_name: &str) -> Result<bool> {
     let status = docker_command()
         .args(["image", "inspect", image_name])
@@ -200,36 +294,56 @@ fn ensure_volume(volume_name: &str) -> Result<()> {
 }
 
 fn run_browser_container(spec: &BrowserSpec) -> Result<()> {
-    docker(
-        [
-            "run",
-            "-d",
-            "--name",
-            &spec.container_name,
-            "--label",
-            "docker-git.browser=1",
-            "--label",
-            &format!("docker-git.project-container={}", spec.main_container_name),
-            "--network",
-            &spec.network_mode,
-            "--shm-size",
-            "2g",
-            "-e",
-            "VNC_NOPW=1",
-            "-v",
-            &format!("{}:/data", spec.volume_name),
-            &spec.image_name,
-        ],
-        "docker run browser",
-    )
-    .map(|_| ())
+    let mut args = vec![
+        "run".to_string(),
+        "-d".to_string(),
+        "--name".to_string(),
+        spec.container_name.clone(),
+        "--label".to_string(),
+        "docker-git.browser=1".to_string(),
+        "--label".to_string(),
+        format!("docker-git.project-container={}", spec.main_container_name),
+        "--network".to_string(),
+        spec.network_mode.clone(),
+        "--shm-size".to_string(),
+        "2g".to_string(),
+    ];
+
+    if should_publish_ports(&spec.network_mode) {
+        args.extend([
+            "-p".to_string(),
+            format!("127.0.0.1:{}:{}", spec.ports.vnc, crate::BROWSER_VNC_PORT),
+            "-p".to_string(),
+            format!(
+                "127.0.0.1:{}:{}",
+                spec.ports.novnc,
+                crate::BROWSER_NOVNC_PORT
+            ),
+            "-p".to_string(),
+            format!("127.0.0.1:{}:{}", spec.ports.cdp, crate::BROWSER_CDP_PORT),
+        ]);
+    }
+
+    args.extend([
+        "-e".to_string(),
+        "VNC_NOPW=1".to_string(),
+        "-v".to_string(),
+        format!("{}:/data", spec.volume_name),
+        spec.image_name.clone(),
+    ]);
+
+    docker_dynamic(&args, "docker run browser").map(|_| ())
 }
 
 fn cdp_probe_candidates(spec: &BrowserSpec) -> Vec<String> {
-    let mut candidates = vec![format!(
-        "http://127.0.0.1:{}/json/version",
-        crate::BROWSER_CDP_PORT
-    )];
+    let mut candidates = if should_publish_ports(&spec.network_mode) {
+        vec![format!("http://127.0.0.1:{}/json/version", spec.ports.cdp)]
+    } else {
+        vec![format!(
+            "http://127.0.0.1:{}/json/version",
+            crate::BROWSER_CDP_PORT
+        )]
+    };
 
     if let Some(container_name) = spec.network_mode.strip_prefix("container:") {
         if let Ok(Some(ip)) = inspect_container_ip(container_name) {
@@ -254,6 +368,46 @@ fn cdp_probe_candidates(spec: &BrowserSpec) -> Vec<String> {
     candidates
 }
 
+fn novnc_probe_candidates(spec: &BrowserSpec) -> Vec<String> {
+    let mut candidates = if should_publish_ports(&spec.network_mode) {
+        vec![crate::render_novnc_url_for_ports(spec.ports)]
+    } else {
+        vec![crate::render_novnc_url()]
+    };
+
+    if let Some(container_name) = spec.network_mode.strip_prefix("container:") {
+        if let Ok(Some(ip)) = inspect_container_ip(container_name) {
+            candidates.push(format!(
+                "http://{}:{}/vnc.html?autoconnect=true&resize=remote&path=websockify",
+                ip,
+                crate::BROWSER_NOVNC_PORT
+            ));
+        }
+    }
+
+    if let Ok(Some(ip)) = inspect_container_ip(&spec.container_name) {
+        candidates.push(format!(
+            "http://{}:{}/vnc.html?autoconnect=true&resize=remote&path=websockify",
+            ip,
+            crate::BROWSER_NOVNC_PORT
+        ));
+    }
+
+    candidates.sort();
+    candidates.dedup();
+    candidates
+}
+
+fn runtime_urls(spec: &BrowserSpec) -> Result<(String, String)> {
+    let cdp_url = wait_for_cdp(spec)?;
+    let novnc_url = wait_for_novnc(spec)?;
+    Ok((cdp_url, novnc_url))
+}
+
+fn cdp_version_url_to_base(url: &str) -> String {
+    url.trim_end_matches("/json/version").to_string()
+}
+
 // CHANGE: probe CDP through localhost first, then Docker bridge/container IP fallbacks.
 // WHY: host-side verification often cannot reach localhost:9223 when the Rust-created browser shares a project network namespace.
 // QUOTE(ТЗ): "Если localhost:9223 не работает, найди bridge IP через docker inspect"
@@ -264,7 +418,7 @@ fn cdp_probe_candidates(spec: &BrowserSpec) -> Vec<String> {
 // EFFECT: curl subprocesses observe network readiness.
 // INVARIANT: success proves the CDP endpoint for spec.container_name is answering /json/version.
 // COMPLEXITY: O(a*b), a = attempts, b = candidate endpoints.
-fn wait_for_cdp(spec: &BrowserSpec) -> Result<()> {
+fn wait_for_cdp(spec: &BrowserSpec) -> Result<String> {
     ensure_curl_available()?;
     let mut last_candidates = Vec::new();
     for _ in 0..60 {
@@ -285,13 +439,36 @@ fn wait_for_cdp(spec: &BrowserSpec) -> Result<()> {
                 .stderr(Stdio::null())
                 .status();
             if matches!(status, Ok(exit) if exit.success()) {
-                return Ok(());
+                return Ok(cdp_version_url_to_base(url));
             }
         }
         std::thread::sleep(std::time::Duration::from_secs(1));
     }
     Err(anyhow!(
         "browser CDP endpoint did not become ready; tried: {}",
+        last_candidates.join(", ")
+    ))
+}
+
+fn wait_for_novnc(spec: &BrowserSpec) -> Result<String> {
+    ensure_curl_available()?;
+    let mut last_candidates = Vec::new();
+    for _ in 0..30 {
+        last_candidates = novnc_probe_candidates(spec);
+        for url in &last_candidates {
+            let status = Command::new("curl")
+                .args(["-sSf", "--connect-timeout", "2", "--max-time", "5", url])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+            if matches!(status, Ok(exit) if exit.success()) {
+                return Ok(url.to_string());
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_secs(1));
+    }
+    Err(anyhow!(
+        "browser noVNC endpoint did not become ready; tried: {}",
         last_candidates.join(", ")
     ))
 }
@@ -390,4 +567,22 @@ impl Drop for BrowserBuildContext {
 fn path_to_str(path: &Path) -> &str {
     path.to_str()
         .expect("temporary Docker build path must be valid UTF-8")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn missing_project_container_falls_back_to_bridge_network() {
+        assert_eq!(
+            effective_network_mode("container:dg-missing", None),
+            "bridge"
+        );
+        assert_eq!(
+            effective_network_mode("container:dg-project", Some("running")),
+            "container:dg-project"
+        );
+        assert_eq!(effective_network_mode("bridge", None), "bridge");
+    }
 }
