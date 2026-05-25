@@ -141,7 +141,14 @@ impl DockerBrowserShell {
         ensure_docker_available()?;
         let removed = match inspect_container_state(&spec.container_name)? {
             Some(_) => {
-                docker(["rm", "-f", &spec.container_name], "docker rm browser")?;
+                match docker(["rm", "-f", &spec.container_name], "docker rm browser") {
+                    Ok(_) => {}
+                    Err(error) => {
+                        if inspect_container_state(&spec.container_name)?.is_some() {
+                            return Err(error);
+                        }
+                    }
+                }
                 true
             }
             None => false,
