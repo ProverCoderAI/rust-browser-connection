@@ -21,12 +21,17 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use crate::BrowserSpec;
+use crate::{BrowserResourceLimits, BrowserSpec};
 
 pub(crate) struct BrowserRuntime {
     pub container_name: String,
     pub novnc_url: String,
     pub cdp_url: String,
+}
+
+pub(crate) struct BrowserStopRuntime {
+    pub container_name: String,
+    pub removed: bool,
 }
 
 const BROWSER_DOCKERFILE: &str = r#"FROM kechangdev/browser-vnc:latest
@@ -89,7 +94,11 @@ impl DockerBrowserShell {
         Self
     }
 
-    pub fn ensure_browser_container(&self, spec: &BrowserSpec) -> Result<BrowserRuntime> {
+    pub fn ensure_browser_container(
+        &self,
+        spec: &BrowserSpec,
+        limits: &BrowserResourceLimits,
+    ) -> Result<BrowserRuntime> {
         ensure_docker_available()?;
         ensure_browser_image(spec)?;
 
@@ -119,12 +128,28 @@ impl DockerBrowserShell {
         );
 
         ensure_volume(&runtime_spec.volume_name)?;
-        run_browser_container(&runtime_spec)?;
+        run_browser_container(&runtime_spec, limits)?;
         let (cdp_url, novnc_url) = runtime_urls(&runtime_spec)?;
         Ok(BrowserRuntime {
             container_name: runtime_spec.container_name,
             novnc_url,
             cdp_url,
+        })
+    }
+
+    pub fn stop_browser_container(&self, spec: &BrowserSpec) -> Result<BrowserStopRuntime> {
+        ensure_docker_available()?;
+        let removed = match inspect_container_state(&spec.container_name)? {
+            Some(_) => {
+                docker(["rm", "-f", &spec.container_name], "docker rm browser")?;
+                true
+            }
+            None => false,
+        };
+
+        Ok(BrowserStopRuntime {
+            container_name: spec.container_name.clone(),
+            removed,
         })
     }
 }
@@ -346,7 +371,21 @@ fn ensure_volume(volume_name: &str) -> Result<()> {
     docker(["volume", "create", volume_name], "docker volume create").map(|_| ())
 }
 
-fn run_browser_container(spec: &BrowserSpec) -> Result<()> {
+fn browser_resource_limit_args(limits: &BrowserResourceLimits) -> Vec<String> {
+    let mut args = Vec::new();
+
+    if let Some(cpu_limit) = &limits.cpu_limit {
+        args.extend(["--cpus".to_string(), cpu_limit.clone()]);
+    }
+
+    if let Some(ram_limit) = &limits.ram_limit {
+        args.extend(["--memory".to_string(), ram_limit.clone()]);
+    }
+
+    args
+}
+
+fn run_browser_container(spec: &BrowserSpec, limits: &BrowserResourceLimits) -> Result<()> {
     let mut args = vec![
         "run".to_string(),
         "-d".to_string(),
@@ -361,6 +400,8 @@ fn run_browser_container(spec: &BrowserSpec) -> Result<()> {
         "--shm-size".to_string(),
         "2g".to_string(),
     ];
+
+    args.extend(browser_resource_limit_args(limits));
 
     if should_publish_ports(&spec.network_mode) {
         args.extend([
@@ -637,6 +678,27 @@ mod tests {
             "container:dg-project"
         );
         assert_eq!(effective_network_mode("bridge", None), "bridge");
+    }
+
+    #[test]
+    fn browser_resource_limit_args_are_omitted_when_limits_are_empty() {
+        assert!(browser_resource_limit_args(&BrowserResourceLimits::none()).is_empty());
+    }
+
+    #[test]
+    fn browser_resource_limit_args_render_docker_run_limits() {
+        assert_eq!(
+            browser_resource_limit_args(&BrowserResourceLimits::from_values(
+                Some("0.5"),
+                Some("1g")
+            )),
+            vec![
+                "--cpus".to_string(),
+                "0.5".to_string(),
+                "--memory".to_string(),
+                "1g".to_string()
+            ]
+        );
     }
 
     #[test]

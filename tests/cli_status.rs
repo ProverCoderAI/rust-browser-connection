@@ -18,3 +18,28 @@ fn status_command_prints_single_browser_urls_without_docker() {
     assert!(stdout.contains(&format!("CDP: {}", render_cdp_url_for_ports(ports))));
     assert!(stdout.contains("Invariant check: true"));
 }
+
+#[test]
+fn start_help_exposes_resource_limit_flags_without_docker() {
+    let output = Command::new(env!("CARGO_BIN_EXE_docker-git-browser-connection"))
+        .args(["start", "--help"])
+        .output()
+        .expect("Failed to execute binary");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("--cpu-limit"));
+    assert!(stdout.contains("--ram-limit"));
+}
+
+#[test]
+fn root_help_exposes_stop_command_without_docker() {
+    let output = Command::new(env!("CARGO_BIN_EXE_docker-git-browser-connection"))
+        .args(["--help"])
+        .output()
+        .expect("Failed to execute binary");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("stop"));
+}
