@@ -19,7 +19,15 @@ use std::env;
 use std::io::{BufRead, Write};
 
 pub const SERVER_NAME: &str = "browser-connection";
-pub const MCP_PROTOCOL_VERSION: &str = "2024-11-05";
+pub const MCP_PROTOCOL_VERSION: &str = "2025-06-18";
+pub const LEGACY_MCP_PROTOCOL_VERSION: &str = "2025-03-26";
+pub const OLDEST_MCP_PROTOCOL_VERSION: &str = "2024-11-05";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StdioTransport {
+    Framed,
+    LineDelimited,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct McpServerConfig {
@@ -60,11 +68,14 @@ where
 {
     let mut reader = reader;
     let mut runtime = McpRuntime::new(config);
+    let mut transport = None;
 
-    while let Some(message) = read_message(&mut reader)? {
+    while let Some(message) = read_message(&mut reader, &mut transport)? {
         match handle_message(&mut runtime, &message) {
             Ok(Some(response)) => {
-                write_message(&mut writer, &response)?;
+                let transport = transport
+                    .ok_or_else(|| anyhow!("stdio transport was unknown after reading a message"))?;
+                write_message(&mut writer, &response, transport)?;
             }
             Ok(None) => {}
             Err(error) => {
@@ -73,7 +84,8 @@ where
                     "id": Value::Null,
                     "error": { "code": -32603, "message": error.to_string() }
                 });
-                write_message(&mut writer, &response)?;
+                let transport = transport.unwrap_or(StdioTransport::Framed);
+                write_message(&mut writer, &response, transport)?;
             }
         }
     }
@@ -125,7 +137,47 @@ fn resolve_cdp_endpoint(config: &McpServerConfig) -> Result<String> {
     Ok(info.cdp_url)
 }
 
-fn read_message<R: BufRead>(reader: &mut R) -> Result<Option<String>> {
+fn read_message<R: BufRead>(
+    reader: &mut R,
+    transport: &mut Option<StdioTransport>,
+) -> Result<Option<String>> {
+    if transport.is_none() {
+        *transport = detect_transport(reader)?;
+    }
+
+    let Some(transport) = transport else {
+        return Ok(None);
+    };
+
+    match transport {
+        StdioTransport::Framed => read_framed_message(reader),
+        StdioTransport::LineDelimited => read_line_message(reader),
+    }
+}
+
+fn detect_transport<R: BufRead>(reader: &mut R) -> Result<Option<StdioTransport>> {
+    loop {
+        let buffer = reader
+            .fill_buf()
+            .context("failed to inspect MCP stdin for transport detection")?;
+        let Some(first_byte) = buffer.first().copied() else {
+            return Ok(None);
+        };
+
+        match first_byte {
+            b'{' | b'[' => return Ok(Some(StdioTransport::LineDelimited)),
+            b'C' | b'c' => return Ok(Some(StdioTransport::Framed)),
+            b' ' | b'\t' | b'\r' | b'\n' => reader.consume(1),
+            _ => {
+                return Err(anyhow!(
+                    "MCP stdin transport was not recognized from first byte: {first_byte}"
+                ))
+            }
+        }
+    }
+}
+
+fn read_framed_message<R: BufRead>(reader: &mut R) -> Result<Option<String>> {
     let content_length = read_content_length(reader)?;
     let Some(content_length) = content_length else {
         return Ok(None);
@@ -139,6 +191,23 @@ fn read_message<R: BufRead>(reader: &mut R) -> Result<Option<String>> {
     String::from_utf8(body)
         .map(Some)
         .context("MCP stdin body was not utf8")
+}
+
+fn read_line_message<R: BufRead>(reader: &mut R) -> Result<Option<String>> {
+    loop {
+        let mut line = String::new();
+        let read = reader
+            .read_line(&mut line)
+            .context("failed to read MCP stdin line")?;
+        if read == 0 {
+            return Ok(None);
+        }
+
+        let message = line.trim_end_matches(&['\r', '\n'][..]).trim();
+        if !message.is_empty() {
+            return Ok(Some(message.to_string()));
+        }
+    }
 }
 
 fn read_content_length<R: BufRead>(reader: &mut R) -> Result<Option<usize>> {
@@ -189,13 +258,28 @@ fn read_content_length<R: BufRead>(reader: &mut R) -> Result<Option<usize>> {
         .ok_or_else(|| anyhow!("MCP stdin header was missing Content-Length"))
 }
 
-fn write_message<W: Write>(writer: &mut W, response: &Value) -> Result<()> {
-    let body = serde_json::to_vec(response).context("failed to encode MCP stdout JSON")?;
-    write!(writer, "Content-Length: {}\r\n\r\n", body.len())
-        .context("failed to write MCP stdout header")?;
-    writer
-        .write_all(&body)
-        .context("failed to write MCP stdout body")?;
+fn write_message<W: Write>(
+    writer: &mut W,
+    response: &Value,
+    transport: StdioTransport,
+) -> Result<()> {
+    match transport {
+        StdioTransport::Framed => {
+            let body = serde_json::to_vec(response).context("failed to encode MCP stdout JSON")?;
+            write!(writer, "Content-Length: {}\r\n\r\n", body.len())
+                .context("failed to write MCP stdout header")?;
+            writer
+                .write_all(&body)
+                .context("failed to write MCP stdout body")?;
+        }
+        StdioTransport::LineDelimited => {
+            serde_json::to_writer(&mut *writer, response)
+                .context("failed to encode MCP stdout JSON")?;
+            writer
+                .write_all(b"\n")
+                .context("failed to write MCP stdout line terminator")?;
+        }
+    }
     writer.flush().context("failed to flush MCP stdout")?;
     Ok(())
 }
@@ -214,7 +298,10 @@ fn handle_message(runtime: &mut McpRuntime, message: &str) -> Result<Option<Valu
     let id = id.unwrap_or(Value::Null);
 
     let response = match method {
-        "initialize" => success_response(id, initialize_result()),
+        "initialize" => match requested_protocol_version(&request) {
+            Ok(protocol_version) => success_response(id, initialize_result(protocol_version)),
+            Err(error) => error_response(id, -32602, &error.to_string()),
+        },
         "tools/list" => success_response(id, json!({ "tools": tool_definitions() })),
         "tools/call" => success_response(id, handle_tool_call(runtime, &request)),
         _ => error_response(id, -32601, &format!("Unknown MCP method: {method}")),
@@ -223,10 +310,25 @@ fn handle_message(runtime: &mut McpRuntime, message: &str) -> Result<Option<Valu
     Ok(Some(response))
 }
 
-fn initialize_result() -> Value {
+fn requested_protocol_version(request: &Value) -> Result<&'static str> {
+    let requested = request
+        .get("params")
+        .and_then(|params| params.get("protocolVersion"))
+        .and_then(Value::as_str)
+        .unwrap_or(MCP_PROTOCOL_VERSION);
+
+    match requested {
+        MCP_PROTOCOL_VERSION => Ok(MCP_PROTOCOL_VERSION),
+        LEGACY_MCP_PROTOCOL_VERSION => Ok(LEGACY_MCP_PROTOCOL_VERSION),
+        OLDEST_MCP_PROTOCOL_VERSION => Ok(OLDEST_MCP_PROTOCOL_VERSION),
+        _ => Err(anyhow!("Unsupported MCP protocol version: {requested}")),
+    }
+}
+
+fn initialize_result(protocol_version: &str) -> Value {
     json!({
-        "protocolVersion": MCP_PROTOCOL_VERSION,
-        "capabilities": { "tools": {} },
+        "protocolVersion": protocol_version,
+        "capabilities": { "tools": { "listChanged": false } },
         "serverInfo": {
             "name": SERVER_NAME,
             "version": env!("CARGO_PKG_VERSION")
@@ -383,11 +485,20 @@ mod tests {
         let mut cursor = Cursor::new(bytes);
         let mut responses = Vec::new();
 
-        while let Some(message) = read_message(&mut cursor).expect("stdout frame parses") {
+        let mut transport = Some(StdioTransport::Framed);
+        while let Some(message) = read_message(&mut cursor, &mut transport).expect("stdout frame parses") {
             responses.push(serde_json::from_str(&message).expect("stdout frame body is JSON"));
         }
 
         responses
+    }
+
+    fn decode_line_messages(bytes: &[u8]) -> Vec<Value> {
+        let text = String::from_utf8(bytes.to_vec()).expect("stdout lines are utf8");
+        text.lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(|line| serde_json::from_str(line).expect("stdout line is JSON"))
+            .collect()
     }
 
     #[test]
@@ -442,6 +553,32 @@ mod tests {
     }
 
     #[test]
+    fn stdio_initialize_and_list_use_line_delimited_transport() {
+        let config = McpServerConfig::new("dg-test", None, None, false);
+        let input = Cursor::new(
+            [
+                r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{"elicitation":{}},"clientInfo":{"name":"codex-mcp-client","version":"0"}}}"#,
+                r#"{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}"#,
+            ]
+            .join("\n"),
+        );
+        let mut output = Vec::new();
+
+        run_stdio(config, input, &mut output).expect("stdio loop succeeds");
+
+        let responses = decode_line_messages(&output);
+        assert_eq!(responses.len(), 2);
+        assert_eq!(responses[0]["id"], 1);
+        assert_eq!(responses[0]["result"]["protocolVersion"], "2025-06-18");
+        assert_eq!(responses[1]["id"], 2);
+        assert!(responses[1]["result"]["tools"]
+            .as_array()
+            .expect("tools/list returns an array")
+            .iter()
+            .any(|tool| tool["name"] == "browser_navigate"));
+    }
+
+    #[test]
     fn initialize_and_tools_list_do_not_resolve_cdp_endpoint() {
         let config = McpServerConfig::new("dg-test", None, None, true);
         let mut runtime = McpRuntime::new(config);
@@ -458,6 +595,56 @@ mod tests {
         .expect("tools/list succeeds");
 
         assert_eq!(runtime.cdp_endpoint, None);
+    }
+
+    #[test]
+    fn initialize_negotiates_legacy_protocol_version() {
+        let config = McpServerConfig::new("dg-test", None, None, false);
+        let mut runtime = McpRuntime::new(config);
+
+        let response = handle_message(
+            &mut runtime,
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"probe","version":"0"}}}"#,
+        )
+        .expect("initialize succeeds")
+        .expect("request with id returns a response");
+
+        assert_eq!(response["result"]["protocolVersion"], "2024-11-05");
+        assert_eq!(response["result"]["capabilities"]["tools"]["listChanged"], false);
+    }
+
+    #[test]
+    fn initialize_negotiates_latest_protocol_version() {
+        let config = McpServerConfig::new("dg-test", None, None, false);
+        let mut runtime = McpRuntime::new(config);
+
+        let response = handle_message(
+            &mut runtime,
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{"elicitation":{}},"clientInfo":{"name":"codex-mcp-client","version":"0"}}}"#,
+        )
+        .expect("initialize succeeds")
+        .expect("request with id returns a response");
+
+        assert_eq!(response["result"]["protocolVersion"], "2025-06-18");
+    }
+
+    #[test]
+    fn initialize_rejects_unknown_protocol_version() {
+        let config = McpServerConfig::new("dg-test", None, None, false);
+        let mut runtime = McpRuntime::new(config);
+
+        let response = handle_message(
+            &mut runtime,
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2099-01-01","capabilities":{},"clientInfo":{"name":"probe","version":"0"}}}"#,
+        )
+        .expect("initialize response serializes")
+        .expect("request with id returns a response");
+
+        assert_eq!(response["error"]["code"], -32602);
+        assert!(response["error"]["message"]
+            .as_str()
+            .expect("error message exists")
+            .contains("Unsupported MCP protocol version"));
     }
 
     #[test]

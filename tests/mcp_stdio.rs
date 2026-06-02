@@ -41,6 +41,14 @@ fn decode_messages(mut stdout: &[u8]) -> Vec<Value> {
     responses
 }
 
+fn decode_line_messages(stdout: &[u8]) -> Vec<Value> {
+    let text = String::from_utf8(stdout.to_vec()).expect("line output is utf8");
+    text.lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| serde_json::from_str(line).expect("line output is JSON"))
+        .collect()
+}
+
 #[test]
 fn browser_connection_help_exposes_custom_mcp_command_without_npx() {
     let output = Command::new(env!("CARGO_BIN_EXE_browser-connection"))
@@ -136,4 +144,45 @@ fn browser_connection_stdio_initializes_and_lists_browser_tools_without_docker()
     assert!(names.contains(&"browser_type"));
     assert!(names.contains(&"browser_press_key"));
     assert!(names.contains(&"browser_take_screenshot"));
+}
+
+#[test]
+fn browser_connection_stdio_accepts_codex_line_delimited_initialize() {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_browser-connection"))
+        .args(["--project", "dg-test", "--no-start-browser"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("Failed to spawn browser-connection MCP server");
+
+    {
+        let stdin = child.stdin.as_mut().expect("stdin is piped");
+        stdin
+            .write_all(
+                br#"{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{"elicitation":{}},"clientInfo":{"name":"codex-mcp-client","title":"Codex","version":"0.136.0"}}}
+{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}
+"#,
+            )
+            .expect("write MCP line-delimited requests");
+    }
+    drop(child.stdin.take());
+
+    let output = child
+        .wait_with_output()
+        .expect("browser-connection process exits after stdin EOF");
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let responses = decode_line_messages(&output.stdout);
+    assert_eq!(responses.len(), 2);
+    assert_eq!(responses[0]["result"]["protocolVersion"], "2025-06-18");
+    assert!(responses[1]["result"]["tools"]
+        .as_array()
+        .expect("tools/list returns an array")
+        .iter()
+        .any(|tool| tool["name"] == "browser_navigate"));
 }
