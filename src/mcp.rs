@@ -58,18 +58,13 @@ where
     R: BufRead,
     W: Write,
 {
-    let cdp_endpoint = resolve_cdp_endpoint(&config)?;
+    let mut reader = reader;
+    let mut runtime = McpRuntime::new(config);
 
-    for line in reader.lines() {
-        let line = line.context("failed to read MCP stdin")?;
-        if line.trim().is_empty() {
-            continue;
-        }
-
-        match handle_message(&cdp_endpoint, &line) {
+    while let Some(message) = read_message(&mut reader)? {
+        match handle_message(&mut runtime, &message) {
             Ok(Some(response)) => {
-                writeln!(writer, "{response}").context("failed to write MCP stdout")?;
-                writer.flush().context("failed to flush MCP stdout")?;
+                write_message(&mut writer, &response)?;
             }
             Ok(None) => {}
             Err(error) => {
@@ -78,13 +73,37 @@ where
                     "id": Value::Null,
                     "error": { "code": -32603, "message": error.to_string() }
                 });
-                writeln!(writer, "{response}").context("failed to write MCP error")?;
-                writer.flush().context("failed to flush MCP error")?;
+                write_message(&mut writer, &response)?;
             }
         }
     }
 
     Ok(())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct McpRuntime {
+    config: McpServerConfig,
+    cdp_endpoint: Option<String>,
+}
+
+impl McpRuntime {
+    fn new(config: McpServerConfig) -> Self {
+        Self {
+            config,
+            cdp_endpoint: None,
+        }
+    }
+
+    fn cdp_endpoint(&mut self) -> Result<&str> {
+        if self.cdp_endpoint.is_none() {
+            self.cdp_endpoint = Some(resolve_cdp_endpoint(&self.config)?);
+        }
+
+        self.cdp_endpoint
+            .as_deref()
+            .ok_or_else(|| anyhow!("CDP endpoint cache was empty after resolution"))
+    }
 }
 
 fn resolve_cdp_endpoint(config: &McpServerConfig) -> Result<String> {
@@ -106,8 +125,83 @@ fn resolve_cdp_endpoint(config: &McpServerConfig) -> Result<String> {
     Ok(info.cdp_url)
 }
 
-fn handle_message(cdp_endpoint: &str, line: &str) -> Result<Option<Value>> {
-    let request: Value = serde_json::from_str(line).context("MCP stdin line was not JSON")?;
+fn read_message<R: BufRead>(reader: &mut R) -> Result<Option<String>> {
+    let content_length = read_content_length(reader)?;
+    let Some(content_length) = content_length else {
+        return Ok(None);
+    };
+
+    let mut body = vec![0_u8; content_length];
+    reader
+        .read_exact(&mut body)
+        .context("failed to read MCP stdin body")?;
+
+    String::from_utf8(body)
+        .map(Some)
+        .context("MCP stdin body was not utf8")
+}
+
+fn read_content_length<R: BufRead>(reader: &mut R) -> Result<Option<usize>> {
+    let mut content_length = None;
+    let mut saw_header = false;
+
+    loop {
+        let mut line = String::new();
+        let read = reader
+            .read_line(&mut line)
+            .context("failed to read MCP stdin header")?;
+        if read == 0 {
+            return if saw_header {
+                Err(anyhow!("MCP stdin closed before header terminator"))
+            } else {
+                Ok(None)
+            };
+        }
+
+        let header = line.trim_end_matches(&['\r', '\n'][..]);
+        if header.is_empty() {
+            if saw_header {
+                break;
+            }
+            continue;
+        }
+        saw_header = true;
+
+        let (name, value) = header
+            .split_once(':')
+            .ok_or_else(|| anyhow!("MCP stdin header was malformed"))?;
+
+        if name.eq_ignore_ascii_case("Content-Length") {
+            if content_length.is_some() {
+                return Err(anyhow!("MCP stdin declared Content-Length more than once"));
+            }
+            content_length = Some(
+                value
+                    .trim()
+                    .parse::<usize>()
+                    .context("MCP stdin Content-Length was not a valid usize")?,
+            );
+        }
+    }
+
+    content_length
+        .map(Some)
+        .ok_or_else(|| anyhow!("MCP stdin header was missing Content-Length"))
+}
+
+fn write_message<W: Write>(writer: &mut W, response: &Value) -> Result<()> {
+    let body = serde_json::to_vec(response).context("failed to encode MCP stdout JSON")?;
+    write!(writer, "Content-Length: {}\r\n\r\n", body.len())
+        .context("failed to write MCP stdout header")?;
+    writer
+        .write_all(&body)
+        .context("failed to write MCP stdout body")?;
+    writer.flush().context("failed to flush MCP stdout")?;
+    Ok(())
+}
+
+fn handle_message(runtime: &mut McpRuntime, message: &str) -> Result<Option<Value>> {
+    let request: Value = serde_json::from_str(message).context("MCP stdin body was not JSON")?;
     let id = request.get("id").cloned();
     let method = request
         .get("method")
@@ -122,7 +216,7 @@ fn handle_message(cdp_endpoint: &str, line: &str) -> Result<Option<Value>> {
     let response = match method {
         "initialize" => success_response(id, initialize_result()),
         "tools/list" => success_response(id, json!({ "tools": tool_definitions() })),
-        "tools/call" => success_response(id, handle_tool_call(cdp_endpoint, &request)),
+        "tools/call" => success_response(id, handle_tool_call(runtime, &request)),
         _ => error_response(id, -32601, &format!("Unknown MCP method: {method}")),
     };
 
@@ -202,12 +296,14 @@ fn tool(name: &str, description: &str, properties: Value, required: Vec<&str>) -
     })
 }
 
-fn handle_tool_call(cdp_endpoint: &str, request: &Value) -> Value {
+fn handle_tool_call(runtime: &mut McpRuntime, request: &Value) -> Value {
     let params = request.get("params").unwrap_or(&Value::Null);
     let name = params.get("name").and_then(Value::as_str).unwrap_or("");
     let arguments = params.get("arguments").unwrap_or(&Value::Null);
 
-    let result = dispatch_tool(cdp_endpoint, name, arguments);
+    let result = runtime
+        .cdp_endpoint()
+        .and_then(|cdp_endpoint| dispatch_tool(cdp_endpoint, name, arguments));
     match result {
         Ok(text) => tool_result(text, false),
         Err(error) => tool_result(format!("{error:#}"), true),
@@ -276,6 +372,24 @@ mod tests {
     use super::*;
     use std::io::Cursor;
 
+    fn encode_message(value: Value) -> Vec<u8> {
+        let body = serde_json::to_vec(&value).expect("message body serializes");
+        let mut framed = format!("Content-Length: {}\r\n\r\n", body.len()).into_bytes();
+        framed.extend_from_slice(&body);
+        framed
+    }
+
+    fn decode_messages(bytes: &[u8]) -> Vec<Value> {
+        let mut cursor = Cursor::new(bytes);
+        let mut responses = Vec::new();
+
+        while let Some(message) = read_message(&mut cursor).expect("stdout frame parses") {
+            responses.push(serde_json::from_str(&message).expect("stdout frame body is JSON"));
+        }
+
+        responses
+    }
+
     #[test]
     fn env_fallback_prefers_explicit_project() {
         assert_eq!(
@@ -285,20 +399,89 @@ mod tests {
     }
 
     #[test]
-    fn stdio_initialize_is_docker_free_when_start_browser_is_disabled() {
+    fn stdio_initialize_and_list_use_framed_mcp_transport() {
         let config = McpServerConfig::new("dg-test", None, None, false);
-        let input = Cursor::new(
-            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}
-{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}
-"#,
-        );
+        let mut input = Vec::new();
+        input.extend(encode_message(json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": MCP_PROTOCOL_VERSION,
+                "capabilities": {},
+                "clientInfo": { "name": "probe", "version": "0" }
+            }
+        })));
+        input.extend(encode_message(json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/initialized",
+            "params": {}
+        })));
+        input.extend(encode_message(json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/list",
+            "params": {}
+        })));
+
+        let input = Cursor::new(input);
         let mut output = Vec::new();
 
         run_stdio(config, input, &mut output).expect("stdio loop succeeds");
 
-        let stdout = String::from_utf8(output).expect("stdout is utf8");
-        assert!(stdout.contains("\"name\":\"browser-connection\""));
-        assert!(stdout.contains("browser_navigate"));
-        assert!(!stdout.contains("playwright/mcp"));
+        let responses = decode_messages(&output);
+        assert_eq!(responses.len(), 2);
+        assert_eq!(responses[0]["id"], 1);
+        assert_eq!(responses[0]["result"]["serverInfo"]["name"], SERVER_NAME);
+        assert_eq!(responses[1]["id"], 2);
+        assert!(responses[1]["result"]["tools"]
+            .as_array()
+            .expect("tools/list returns an array")
+            .iter()
+            .any(|tool| tool["name"] == "browser_navigate"));
+    }
+
+    #[test]
+    fn initialize_and_tools_list_do_not_resolve_cdp_endpoint() {
+        let config = McpServerConfig::new("dg-test", None, None, true);
+        let mut runtime = McpRuntime::new(config);
+
+        handle_message(
+            &mut runtime,
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#,
+        )
+        .expect("initialize succeeds");
+        handle_message(
+            &mut runtime,
+            r#"{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}"#,
+        )
+        .expect("tools/list succeeds");
+
+        assert_eq!(runtime.cdp_endpoint, None);
+    }
+
+    #[test]
+    fn tools_call_resolves_cdp_endpoint_lazily() {
+        let config = McpServerConfig::new("dg-test", None, None, false);
+        let mut runtime = McpRuntime::new(config);
+        let expected_cdp_url = render_cdp_url();
+
+        let response = handle_message(
+            &mut runtime,
+            r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"unknown","arguments":{}}}"#,
+        )
+        .expect("tools/call response serializes")
+        .expect("request with id returns a response");
+
+        assert_eq!(
+            runtime.cdp_endpoint.as_deref(),
+            Some(expected_cdp_url.as_str())
+        );
+        assert_eq!(response["id"], 3);
+        assert_eq!(response["result"]["isError"], true);
+        assert!(response["result"]["content"][0]["text"]
+            .as_str()
+            .expect("tool result text exists")
+            .contains("Unknown browser-connection tool"));
     }
 }

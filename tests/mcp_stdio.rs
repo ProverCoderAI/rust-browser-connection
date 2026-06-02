@@ -3,6 +3,44 @@ use std::process::{Command, Stdio};
 
 use serde_json::Value;
 
+fn encode_message(value: Value) -> Vec<u8> {
+    let body = serde_json::to_vec(&value).expect("message body serializes");
+    let mut framed = format!("Content-Length: {}\r\n\r\n", body.len()).into_bytes();
+    framed.extend_from_slice(&body);
+    framed
+}
+
+fn decode_messages(mut stdout: &[u8]) -> Vec<Value> {
+    let mut responses = Vec::new();
+
+    while !stdout.is_empty() {
+        let split = stdout
+            .windows(4)
+            .position(|window| window == b"\r\n\r\n")
+            .expect("frame separator present");
+        let (header, rest) = stdout.split_at(split);
+        let body_start = &rest[4..];
+        let header_text = String::from_utf8(header.to_vec()).expect("header is utf8");
+        let content_length = header_text
+            .lines()
+            .find_map(|line| {
+                line.split_once(':').and_then(|(name, value)| {
+                    if name.eq_ignore_ascii_case("Content-Length") {
+                        value.trim().parse::<usize>().ok()
+                    } else {
+                        None
+                    }
+                })
+            })
+            .expect("Content-Length header present");
+        let (body, remaining) = body_start.split_at(content_length);
+        responses.push(serde_json::from_slice(body).expect("frame body is JSON"));
+        stdout = remaining;
+    }
+
+    responses
+}
+
 #[test]
 fn browser_connection_help_exposes_custom_mcp_command_without_npx() {
     let output = Command::new(env!("CARGO_BIN_EXE_browser-connection"))
@@ -31,16 +69,30 @@ fn browser_connection_stdio_initializes_and_lists_browser_tools_without_docker()
 
     {
         let stdin = child.stdin.as_mut().expect("stdin is piped");
-        let input = concat!(
-            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"probe","version":"0"}}}"#,
-            "\n",
-            r#"{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}"#,
-            "\n",
-            r#"{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}"#,
-            "\n",
-        );
+        let mut input = Vec::new();
+        input.extend(encode_message(serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": { "name": "probe", "version": "0" }
+            }
+        })));
+        input.extend(encode_message(serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/initialized",
+            "params": {}
+        })));
+        input.extend(encode_message(serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/list",
+            "params": {}
+        })));
         stdin
-            .write_all(input.as_bytes())
+            .write_all(&input)
             .expect("write MCP handshake requests");
     }
     drop(child.stdin.take());
@@ -54,13 +106,14 @@ fn browser_connection_stdio_initializes_and_lists_browser_tools_without_docker()
         String::from_utf8_lossy(&output.stderr)
     );
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let responses = stdout
-        .lines()
-        .map(|line| serde_json::from_str::<Value>(line).expect("stdout line is JSON"))
-        .collect::<Vec<_>>();
+    let responses = decode_messages(&output.stdout);
 
-    assert_eq!(responses.len(), 2, "stdout was: {stdout}");
+    assert_eq!(
+        responses.len(),
+        2,
+        "stdout was: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
     assert_eq!(responses[0]["id"], 1);
     assert_eq!(
         responses[0]["result"]["serverInfo"]["name"],

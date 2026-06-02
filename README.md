@@ -75,11 +75,50 @@ browser_take_screenshot(full_page?)
 ## Smoke test
 
 ```bash
-printf '%s\n' \
-  '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"probe","version":"0"}}}' \
-  '{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}' \
-  '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}' \
-| browser-connection --project dg-my-project --no-start-browser
+python3 - <<'PY' | browser-connection --project dg-my-project --no-start-browser | python3 - <<'PY'
+import json
+import sys
+
+messages = [
+    {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2024-11-05",
+            "capabilities": {},
+            "clientInfo": {"name": "probe", "version": "0"},
+        },
+    },
+    {"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}},
+    {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}},
+]
+
+for message in messages:
+    body = json.dumps(message, separators=(",", ":")).encode()
+    sys.stdout.buffer.write(f"Content-Length: {len(body)}\r\n\r\n".encode())
+    sys.stdout.buffer.write(body)
+PY
+import json
+import sys
+
+stream = sys.stdin.buffer
+while True:
+    header = {}
+    while True:
+        line = stream.readline()
+        if not line:
+            raise SystemExit(0)
+        stripped = line.strip()
+        if not stripped:
+            break
+        name, value = line.decode().split(":", 1)
+        header[name.lower()] = value.strip()
+
+    length = int(header["content-length"])
+    body = stream.read(length)
+    print(json.dumps(json.loads(body), indent=2))
+PY
 ```
 
 Expected: server `browser-connection` and tools like `browser_navigate`, `browser_snapshot`, `browser_evaluate`.
