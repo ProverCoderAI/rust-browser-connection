@@ -147,6 +147,60 @@ fn browser_connection_stdio_initializes_and_lists_browser_tools_without_docker()
 }
 
 #[test]
+fn browser_connection_stdio_accepts_claude_framed_initialize() {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_browser-connection"))
+        .args(["--project", "dg-test", "--no-start-browser"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("Failed to spawn browser-connection MCP server");
+
+    {
+        let stdin = child.stdin.as_mut().expect("stdin is piped");
+        let mut input = Vec::new();
+        input.extend(encode_message(serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-11-25",
+                "capabilities": { "roots": { "listChanged": true } },
+                "clientInfo": { "name": "claude-code", "version": "2.1.160" }
+            }
+        })));
+        input.extend(encode_message(serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/list",
+            "params": {}
+        })));
+        stdin
+            .write_all(&input)
+            .expect("write Claude MCP handshake requests");
+    }
+    drop(child.stdin.take());
+
+    let output = child
+        .wait_with_output()
+        .expect("browser-connection process exits after stdin EOF");
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let responses = decode_messages(&output.stdout);
+    assert_eq!(responses.len(), 2);
+    assert_eq!(responses[0]["result"]["protocolVersion"], "2025-11-25");
+    assert!(responses[1]["result"]["tools"]
+        .as_array()
+        .expect("tools/list returns an array")
+        .iter()
+        .any(|tool| tool["name"] == "browser_navigate"));
+}
+
+#[test]
 fn browser_connection_stdio_accepts_codex_line_delimited_initialize() {
     let mut child = Command::new(env!("CARGO_BIN_EXE_browser-connection"))
         .args(["--project", "dg-test", "--no-start-browser"])

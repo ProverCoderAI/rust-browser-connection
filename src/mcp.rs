@@ -19,7 +19,8 @@ use std::env;
 use std::io::{BufRead, Write};
 
 pub const SERVER_NAME: &str = "browser-connection";
-pub const MCP_PROTOCOL_VERSION: &str = "2025-06-18";
+pub const MCP_PROTOCOL_VERSION: &str = "2025-11-25";
+pub const PREVIOUS_MCP_PROTOCOL_VERSION: &str = "2025-06-18";
 pub const LEGACY_MCP_PROTOCOL_VERSION: &str = "2025-03-26";
 pub const OLDEST_MCP_PROTOCOL_VERSION: &str = "2024-11-05";
 
@@ -319,6 +320,7 @@ fn requested_protocol_version(request: &Value) -> Result<&'static str> {
 
     match requested {
         MCP_PROTOCOL_VERSION => Ok(MCP_PROTOCOL_VERSION),
+        PREVIOUS_MCP_PROTOCOL_VERSION => Ok(PREVIOUS_MCP_PROTOCOL_VERSION),
         LEGACY_MCP_PROTOCOL_VERSION => Ok(LEGACY_MCP_PROTOCOL_VERSION),
         OLDEST_MCP_PROTOCOL_VERSION => Ok(OLDEST_MCP_PROTOCOL_VERSION),
         _ => Err(anyhow!("Unsupported MCP protocol version: {requested}")),
@@ -615,6 +617,21 @@ mod tests {
 
     #[test]
     fn initialize_negotiates_latest_protocol_version() {
+        let config = McpServerConfig::new("dg-test", None, None, false);
+        let mut runtime = McpRuntime::new(config);
+
+        let response = handle_message(
+            &mut runtime,
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{"roots":{"listChanged":true}},"clientInfo":{"name":"claude-code","version":"2.1.160"}}}"#,
+        )
+        .expect("initialize succeeds")
+        .expect("request with id returns a response");
+
+        assert_eq!(response["result"]["protocolVersion"], "2025-11-25");
+    }
+
+    #[test]
+    fn initialize_negotiates_previous_protocol_version() {
         let config = McpServerConfig::new("dg-test", None, None, false);
         let mut runtime = McpRuntime::new(config);
 
