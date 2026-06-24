@@ -28,6 +28,10 @@ tungstenite = "0.24"
 name = "browser-connection"
 path = "src/bin/browser-connection.rs"
 
+[[bin]]
+name = "browser-connection-relay"
+path = "src/bin/browser-connection-relay.rs"
+
 [dev-dependencies]
 tempfile = "=3.10.1"
 proptest = "=1.4.0"

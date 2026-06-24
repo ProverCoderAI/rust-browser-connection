@@ -1,0 +1,26 @@
+{
+  "manifest_version": 3,
+  "name": "Browser Connection Edge Share",
+  "version": "0.1.0",
+  "description": "Share this Edge browser with browser-connection through a relay link.",
+  "permissions": [
+    "activeTab",
+    "debugger",
+    "scripting",
+    "storage",
+    "tabs"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "background": {
+    "service_worker": "service_worker.js"
+  },
+  "action": {
+    "default_title": "Edge Share",
+    "default_popup": "popup.html"
+  },
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'self'; connect-src 'self' http://* https://* ws://* wss://*;"
+  }
+}

@@ -12,20 +12,30 @@ INVARIANT: browser tools always target the active CDP endpoint: managed, explici
 */
 
 use crate::browser_target::{
-    configured_browser_kind, normalize_browser_name, normalize_cdp_endpoint,
-    upsert_browser_endpoint,
+    configured_browser_kind, normalize_browser_name, normalize_cdp_endpoint, normalize_novnc_url,
+    normalize_share_url, normalize_vnc_endpoint, upsert_browser_endpoint, upsert_browser_novnc_url,
+    upsert_browser_share_url, upsert_browser_vnc_endpoint,
 };
 use crate::cdp::CdpClient;
-use crate::{compute_browser_ports, render_cdp_url, render_cdp_url_for_ports, BrowserConnection};
+use crate::shared_browser::SharedBrowserClient;
+use crate::{
+    compute_browser_ports, render_browser_control_panel_url_for_port,
+    render_browser_target_novnc_url, render_cdp_url, render_cdp_url_for_ports, BrowserConnection,
+};
 use anyhow::{anyhow, Context, Result};
 use serde_json::{json, Value};
 use std::env;
 use std::io::{BufRead, Write};
+use std::sync::{Arc, Mutex};
+
+mod control_panel;
 
 pub use crate::browser_target::{
     active_browser_from_env, browser_endpoints_from_env, parse_named_browser_endpoint,
-    parse_named_browser_endpoints, NamedBrowserEndpoint, EXPLICIT_BROWSER_NAME,
-    MANAGED_BROWSER_NAME, PERSONAL_BROWSER_NAME,
+    parse_named_browser_endpoints, parse_named_browser_novnc_url, parse_named_browser_novnc_urls,
+    parse_named_browser_share_url, parse_named_browser_share_urls,
+    parse_named_browser_vnc_endpoint, parse_named_browser_vnc_endpoints, NamedBrowserEndpoint,
+    EXPLICIT_BROWSER_NAME, MANAGED_BROWSER_NAME, PERSONAL_BROWSER_NAME,
 };
 pub const SERVER_NAME: &str = "browser-connection";
 pub const MCP_PROTOCOL_VERSION: &str = "2025-11-25";
@@ -47,6 +57,7 @@ pub struct McpServerConfig {
     pub start_browser: bool,
     pub browser_endpoints: Vec<NamedBrowserEndpoint>,
     pub active_browser: Option<String>,
+    pub control_port: Option<u16>,
 }
 
 impl McpServerConfig {
@@ -63,6 +74,7 @@ impl McpServerConfig {
             start_browser,
             browser_endpoints: Vec::new(),
             active_browser: None,
+            control_port: None,
         }
     }
 
@@ -73,12 +85,59 @@ impl McpServerConfig {
         self
     }
 
+    pub fn with_browser_vnc_endpoint(
+        mut self,
+        name: impl AsRef<str>,
+        vnc_endpoint: impl AsRef<str>,
+    ) -> Result<Self> {
+        let name = normalize_configured_browser_name_for_display(name.as_ref())?;
+        upsert_browser_vnc_endpoint(
+            &mut self.browser_endpoints,
+            name,
+            normalize_vnc_endpoint(vnc_endpoint.as_ref())?,
+        );
+        Ok(self)
+    }
+
+    pub fn with_browser_novnc_url(
+        mut self,
+        name: impl AsRef<str>,
+        novnc_url: impl AsRef<str>,
+    ) -> Result<Self> {
+        let name = normalize_configured_browser_name_for_display(name.as_ref())?;
+        upsert_browser_novnc_url(
+            &mut self.browser_endpoints,
+            name,
+            normalize_novnc_url(novnc_url.as_ref())?,
+        );
+        Ok(self)
+    }
+
+    pub fn with_browser_share_url(
+        mut self,
+        name: impl AsRef<str>,
+        share_url: impl AsRef<str>,
+    ) -> Result<Self> {
+        let name = normalize_configured_browser_name_for_display(name.as_ref())?;
+        upsert_browser_share_url(
+            &mut self.browser_endpoints,
+            name,
+            normalize_share_url(share_url.as_ref())?,
+        );
+        Ok(self)
+    }
+
     pub fn with_active_browser(mut self, active_browser: Option<String>) -> Result<Self> {
         self.active_browser = active_browser
             .as_deref()
             .map(normalize_browser_name)
             .transpose()?;
         Ok(self)
+    }
+
+    pub fn with_control_port(mut self, control_port: Option<u16>) -> Self {
+        self.control_port = control_port;
+        self
     }
 }
 
@@ -96,11 +155,18 @@ where
     W: Write,
 {
     let mut reader = reader;
-    let mut runtime = McpRuntime::new(config);
+    let runtime = Arc::new(Mutex::new(McpRuntime::new(config)?));
+    control_panel::spawn_control_panel(Arc::clone(&runtime))?;
     let mut transport = None;
 
     while let Some(message) = read_message(&mut reader, &mut transport)? {
-        match handle_message(&mut runtime, &message) {
+        let result = {
+            let mut runtime = runtime
+                .lock()
+                .map_err(|_| anyhow!("MCP runtime lock was poisoned"))?;
+            handle_message(&mut runtime, &message)
+        };
+        match result {
             Ok(Some(response)) => {
                 let transport = transport.ok_or_else(|| {
                     anyhow!("stdio transport was unknown after reading a message")
@@ -131,40 +197,58 @@ struct McpRuntime {
 }
 
 impl McpRuntime {
-    fn new(config: McpServerConfig) -> Self {
+    fn new(config: McpServerConfig) -> Result<Self> {
+        let explicit_endpoint = explicit_cdp_endpoint(&config)?;
         let active_browser = config.active_browser.clone().unwrap_or_else(|| {
-            if has_explicit_cdp_endpoint(&config) {
+            if explicit_endpoint.is_some() {
                 EXPLICIT_BROWSER_NAME.to_string()
             } else {
                 MANAGED_BROWSER_NAME.to_string()
             }
         });
 
-        Self {
+        let runtime = Self {
             config,
             managed_cdp_endpoint: None,
             active_browser,
-        }
+        };
+        runtime.ensure_browser_exists(&runtime.active_browser)?;
+        Ok(runtime)
     }
 
     fn cdp_endpoint(&mut self) -> Result<String> {
         match self.active_browser.as_str() {
             MANAGED_BROWSER_NAME => self.managed_cdp_endpoint(),
-            EXPLICIT_BROWSER_NAME => explicit_cdp_endpoint(&self.config)
+            EXPLICIT_BROWSER_NAME => explicit_cdp_endpoint(&self.config)?
                 .ok_or_else(|| anyhow!("explicit CDP endpoint is not configured")),
             name => self
                 .config
                 .browser_endpoints
                 .iter()
                 .find(|endpoint| endpoint.name == name)
-                .map(|endpoint| endpoint.cdp_endpoint.clone())
+                .and_then(|endpoint| {
+                    (!endpoint.cdp_endpoint.trim().is_empty())
+                        .then(|| endpoint.cdp_endpoint.clone())
+                })
                 .ok_or_else(|| {
                     anyhow!(
-                        "Unknown browser `{name}`. Available browsers: {}",
+                        "Browser `{name}` does not have a CDP endpoint configured. Available browsers: {}",
                         self.available_browser_names().join(", ")
                     )
                 }),
         }
+    }
+
+    fn active_share_url(&self) -> Option<String> {
+        let name = self.active_browser.as_str();
+        if name == MANAGED_BROWSER_NAME || name == EXPLICIT_BROWSER_NAME {
+            return None;
+        }
+        self.config
+            .browser_endpoints
+            .iter()
+            .find(|endpoint| endpoint.name == name)
+            .and_then(|endpoint| endpoint.share_url.clone())
     }
 
     fn managed_cdp_endpoint(&mut self) -> Result<String> {
@@ -178,18 +262,21 @@ impl McpRuntime {
     }
 
     fn browser_inventory_text(&self) -> Result<String> {
-        serde_json::to_string_pretty(&self.browser_inventory())
+        serde_json::to_string_pretty(&self.browser_inventory()?)
             .context("failed to render browser inventory")
     }
 
-    fn browser_inventory(&self) -> Value {
+    fn browser_inventory(&self) -> Result<Value> {
         let mut browsers = vec![self.managed_browser_entry()];
 
-        if let Some(endpoint) = explicit_cdp_endpoint(&self.config) {
+        if let Some(endpoint) = explicit_cdp_endpoint(&self.config)? {
             browsers.push(browser_entry(
                 EXPLICIT_BROWSER_NAME,
                 "explicit",
                 Some(endpoint),
+                None,
+                None,
+                None,
                 "configured",
                 self.active_browser == EXPLICIT_BROWSER_NAME,
             ));
@@ -198,17 +285,21 @@ impl McpRuntime {
         for endpoint in &self.config.browser_endpoints {
             browsers.push(browser_entry(
                 &endpoint.name,
-                configured_browser_kind(&endpoint.name),
-                Some(endpoint.cdp_endpoint.clone()),
+                browser_endpoint_kind(endpoint),
+                (!endpoint.cdp_endpoint.trim().is_empty()).then(|| endpoint.cdp_endpoint.clone()),
+                endpoint.vnc_endpoint.clone(),
+                endpoint_novnc_url(&self.config, endpoint),
+                endpoint.share_url.clone(),
                 "configured",
                 self.active_browser == endpoint.name,
             ));
         }
 
-        json!({
+        Ok(json!({
             "active": self.active_browser,
+            "controlPanelUrl": control_panel_url(&self.config),
             "browsers": browsers
-        })
+        }))
     }
 
     fn managed_browser_entry(&self) -> Value {
@@ -232,12 +323,22 @@ impl McpRuntime {
             MANAGED_BROWSER_NAME,
             "managed",
             endpoint,
+            None,
+            Some(managed_novnc_url(&self.config)),
+            None,
             resolution,
             self.active_browser == MANAGED_BROWSER_NAME,
         )
     }
 
-    fn select_browser(&mut self, name: &str, cdp_endpoint: Option<&str>) -> Result<String> {
+    fn select_browser(
+        &mut self,
+        name: &str,
+        cdp_endpoint: Option<&str>,
+        vnc_endpoint: Option<&str>,
+        novnc_url: Option<&str>,
+        share_url: Option<&str>,
+    ) -> Result<String> {
         let name = normalize_browser_name(name)?;
 
         if let Some(endpoint) = cdp_endpoint {
@@ -248,14 +349,52 @@ impl McpRuntime {
             }
             let endpoint = NamedBrowserEndpoint::new(&name, endpoint)?;
             upsert_browser_endpoint(&mut self.config.browser_endpoints, endpoint);
-        } else {
-            self.ensure_browser_exists(&name)?;
+        }
+        if let Some(endpoint) = vnc_endpoint {
+            if name == MANAGED_BROWSER_NAME || name == EXPLICIT_BROWSER_NAME {
+                return Err(anyhow!(
+                    "`{name}` is reserved; VNC metadata belongs to custom browser targets"
+                ));
+            }
+            upsert_browser_vnc_endpoint(
+                &mut self.config.browser_endpoints,
+                name.clone(),
+                normalize_vnc_endpoint(endpoint)?,
+            );
+        }
+        if let Some(url) = novnc_url {
+            if name == MANAGED_BROWSER_NAME || name == EXPLICIT_BROWSER_NAME {
+                return Err(anyhow!(
+                    "`{name}` is reserved; noVNC metadata belongs to custom browser targets"
+                ));
+            }
+            upsert_browser_novnc_url(
+                &mut self.config.browser_endpoints,
+                name.clone(),
+                normalize_novnc_url(url)?,
+            );
+        }
+        if let Some(url) = share_url {
+            if name == MANAGED_BROWSER_NAME || name == EXPLICIT_BROWSER_NAME {
+                return Err(anyhow!(
+                    "`{name}` is reserved; shared browser links belong to custom browser targets"
+                ));
+            }
+            upsert_browser_share_url(
+                &mut self.config.browser_endpoints,
+                name.clone(),
+                normalize_share_url(url)?,
+            );
         }
 
+        self.ensure_browser_exists(&name)?;
+
         self.active_browser = name;
+        self.ensure_active_display()?;
+        let inventory = self.browser_inventory()?;
         serde_json::to_string_pretty(&json!({
             "selected": self.active_browser,
-            "browser": self.browser_inventory()
+            "browser": inventory
                 .get("browsers")
                 .and_then(Value::as_array)
                 .and_then(|browsers| browsers.iter().find(|browser| {
@@ -271,15 +410,23 @@ impl McpRuntime {
         if name == MANAGED_BROWSER_NAME {
             return Ok(());
         }
-        if name == EXPLICIT_BROWSER_NAME && has_explicit_cdp_endpoint(&self.config) {
-            return Ok(());
+        if name == EXPLICIT_BROWSER_NAME {
+            if explicit_cdp_endpoint(&self.config)?.is_some() {
+                return Ok(());
+            }
+            return Err(anyhow!("explicit CDP endpoint is not configured"));
         }
-        if self
+        if let Some(endpoint) = self
             .config
             .browser_endpoints
             .iter()
-            .any(|endpoint| endpoint.name == name)
+            .find(|endpoint| endpoint.name == name)
         {
+            if endpoint.cdp_endpoint.trim().is_empty() && endpoint.share_url.is_none() {
+                return Err(anyhow!(
+                    "Browser `{name}` does not have a CDP endpoint or share URL configured"
+                ));
+            }
             return Ok(());
         }
 
@@ -289,9 +436,46 @@ impl McpRuntime {
         ))
     }
 
+    fn ensure_active_display(&mut self) -> Result<()> {
+        if !self.config.start_browser {
+            return Ok(());
+        }
+
+        let name = self.active_browser.clone();
+        if name == MANAGED_BROWSER_NAME || name == EXPLICIT_BROWSER_NAME {
+            return Ok(());
+        }
+
+        let Some(index) = self
+            .config
+            .browser_endpoints
+            .iter()
+            .position(|endpoint| endpoint.name == name)
+        else {
+            return Ok(());
+        };
+        let endpoint = self.config.browser_endpoints[index].clone();
+        let Some(vnc_endpoint) = endpoint.vnc_endpoint else {
+            return Ok(());
+        };
+        if endpoint.novnc_url.is_some() {
+            return Ok(());
+        }
+
+        let connection = BrowserConnection::new()?;
+        let info = connection.start_browser_target_display(
+            &self.config.project_id,
+            self.config.network.as_deref(),
+            &name,
+            &vnc_endpoint,
+        )?;
+        self.config.browser_endpoints[index].novnc_url = Some(info.novnc_url);
+        Ok(())
+    }
+
     fn available_browser_names(&self) -> Vec<String> {
         let mut names = vec![MANAGED_BROWSER_NAME.to_string()];
-        if has_explicit_cdp_endpoint(&self.config) {
+        if explicit_cdp_endpoint(&self.config).ok().flatten().is_some() {
             names.push(EXPLICIT_BROWSER_NAME.to_string());
         }
         names.extend(
@@ -314,21 +498,22 @@ fn resolve_managed_cdp_endpoint(config: &McpServerConfig) -> Result<String> {
     Ok(info.cdp_url)
 }
 
-fn explicit_cdp_endpoint(config: &McpServerConfig) -> Option<String> {
+fn explicit_cdp_endpoint(config: &McpServerConfig) -> Result<Option<String>> {
     config
         .cdp_endpoint
         .as_deref()
-        .and_then(|endpoint| normalize_cdp_endpoint(endpoint).ok())
+        .map(normalize_cdp_endpoint)
+        .transpose()
 }
 
-fn has_explicit_cdp_endpoint(config: &McpServerConfig) -> bool {
-    explicit_cdp_endpoint(config).is_some()
-}
-
+#[allow(clippy::too_many_arguments)]
 fn browser_entry(
     name: &str,
     kind: &str,
     cdp_endpoint: Option<String>,
+    vnc_endpoint: Option<String>,
+    novnc_url: Option<String>,
+    share_url: Option<String>,
     resolution: &str,
     active: bool,
 ) -> Value {
@@ -336,9 +521,54 @@ fn browser_entry(
         "name": name,
         "kind": kind,
         "cdpEndpoint": cdp_endpoint,
+        "vncEndpoint": vnc_endpoint,
+        "novncUrl": novnc_url,
+        "shareUrl": share_url,
         "resolution": resolution,
         "active": active
     })
+}
+
+fn browser_endpoint_kind(endpoint: &NamedBrowserEndpoint) -> &'static str {
+    if endpoint.share_url.is_some() && endpoint.cdp_endpoint.trim().is_empty() {
+        "shared-extension"
+    } else {
+        configured_browser_kind(&endpoint.name)
+    }
+}
+
+fn managed_novnc_url(config: &McpServerConfig) -> String {
+    if !config.start_browser {
+        return crate::render_novnc_url();
+    }
+
+    let ports = compute_browser_ports(&config.project_id);
+    crate::render_novnc_url_for_ports(ports)
+}
+
+fn endpoint_novnc_url(config: &McpServerConfig, endpoint: &NamedBrowserEndpoint) -> Option<String> {
+    endpoint.novnc_url.clone().or_else(|| {
+        endpoint
+            .vnc_endpoint
+            .as_ref()
+            .map(|_| render_browser_target_novnc_url(&config.project_id, &endpoint.name))
+    })
+}
+
+fn control_panel_url(config: &McpServerConfig) -> Option<String> {
+    config
+        .control_port
+        .map(render_browser_control_panel_url_for_port)
+}
+
+fn normalize_configured_browser_name_for_display(name: &str) -> Result<String> {
+    let name = normalize_browser_name(name)?;
+    if name == MANAGED_BROWSER_NAME || name == EXPLICIT_BROWSER_NAME {
+        return Err(anyhow!(
+            "`{name}` is reserved and cannot name a configured browser"
+        ));
+    }
+    Ok(name)
 }
 
 fn read_message<R: BufRead>(
@@ -551,10 +781,13 @@ fn tool_definitions() -> Vec<Value> {
         ),
         tool(
             "browser_select",
-            "Switch the active browser target by name, optionally registering a CDP endpoint first.",
+            "Switch the active browser target by name, optionally registering CDP and display endpoints first.",
             json!({
                 "name": { "type": "string", "description": "Browser target name, e.g. managed or personal" },
-                "cdp_endpoint": { "type": "string", "description": "Optional CDP endpoint to register for this browser name" }
+                "cdp_endpoint": { "type": "string", "description": "Optional CDP endpoint to register for this browser name" },
+                "vnc_endpoint": { "type": "string", "description": "Optional VNC endpoint to register as HOST:PORT" },
+                "novnc_url": { "type": "string", "description": "Optional pre-existing noVNC URL for this browser name" },
+                "share_url": { "type": "string", "description": "Optional shared browser extension link for this browser name" }
             }),
             vec!["name"],
         ),
@@ -628,10 +861,19 @@ fn handle_tool_call(runtime: &mut McpRuntime, request: &Value) -> Value {
         "browser_select" => runtime.select_browser(
             required_str(arguments, "name").unwrap_or(""),
             arguments.get("cdp_endpoint").and_then(Value::as_str),
+            arguments.get("vnc_endpoint").and_then(Value::as_str),
+            arguments.get("novnc_url").and_then(Value::as_str),
+            arguments.get("share_url").and_then(Value::as_str),
         ),
-        _ => runtime
-            .cdp_endpoint()
-            .and_then(|cdp_endpoint| dispatch_tool(&cdp_endpoint, name, arguments)),
+        _ => runtime.ensure_active_display().and_then(|_| {
+            if let Some(share_url) = runtime.active_share_url() {
+                dispatch_shared_tool(&share_url, name, arguments)
+            } else {
+                runtime
+                    .cdp_endpoint()
+                    .and_then(|cdp_endpoint| dispatch_tool(&cdp_endpoint, name, arguments))
+            }
+        }),
     };
     match result {
         Ok(text) => tool_result(text, false),
@@ -641,6 +883,30 @@ fn handle_tool_call(runtime: &mut McpRuntime, request: &Value) -> Value {
 
 fn dispatch_tool(cdp_endpoint: &str, name: &str, arguments: &Value) -> Result<String> {
     let client = CdpClient::new(cdp_endpoint);
+    match name {
+        "browser_navigate" => client.navigate(required_str(arguments, "url")?),
+        "browser_snapshot" => client.snapshot(),
+        "browser_evaluate" => client.evaluate(required_str(arguments, "expression")?),
+        "browser_click" => client.click(required_str(arguments, "selector")?),
+        "browser_type" => client.type_text(
+            required_str(arguments, "selector")?,
+            required_str(arguments, "text")?,
+        ),
+        "browser_press_key" => client.press_key(required_str(arguments, "key")?),
+        "browser_take_screenshot" => {
+            let full_page = arguments
+                .get("full_page")
+                .and_then(Value::as_bool)
+                .unwrap_or(true);
+            client.screenshot(full_page)
+        }
+        "" => Err(anyhow!("tools/call params.name is required")),
+        _ => Err(anyhow!("Unknown browser-connection tool: {name}")),
+    }
+}
+
+fn dispatch_shared_tool(share_url: &str, name: &str, arguments: &Value) -> Result<String> {
+    let client = SharedBrowserClient::new(share_url);
     match name {
         "browser_navigate" => client.navigate(required_str(arguments, "url")?),
         "browser_snapshot" => client.snapshot(),
@@ -697,293 +963,4 @@ fn normalize_project_id(project_id: String) -> String {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use std::io::Cursor;
-
-    fn encode_message(value: Value) -> Vec<u8> {
-        let body = serde_json::to_vec(&value).expect("message body serializes");
-        let mut framed = format!("Content-Length: {}\r\n\r\n", body.len()).into_bytes();
-        framed.extend_from_slice(&body);
-        framed
-    }
-
-    fn decode_messages(bytes: &[u8]) -> Vec<Value> {
-        let mut cursor = Cursor::new(bytes);
-        let mut responses = Vec::new();
-
-        let mut transport = Some(StdioTransport::Framed);
-        while let Some(message) =
-            read_message(&mut cursor, &mut transport).expect("stdout frame parses")
-        {
-            responses.push(serde_json::from_str(&message).expect("stdout frame body is JSON"));
-        }
-
-        responses
-    }
-
-    fn decode_line_messages(bytes: &[u8]) -> Vec<Value> {
-        let text = String::from_utf8(bytes.to_vec()).expect("stdout lines are utf8");
-        text.lines()
-            .filter(|line| !line.trim().is_empty())
-            .map(|line| serde_json::from_str(line).expect("stdout line is JSON"))
-            .collect()
-    }
-
-    #[test]
-    fn env_fallback_prefers_explicit_project() {
-        assert_eq!(
-            project_id_from_env_or_default(Some(" dg-x ".to_string())),
-            "dg-x"
-        );
-    }
-
-    #[test]
-    fn stdio_initialize_and_list_use_framed_mcp_transport() {
-        let config = McpServerConfig::new("dg-test", None, None, false);
-        let mut input = Vec::new();
-        input.extend(encode_message(json!({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "initialize",
-            "params": {
-                "protocolVersion": MCP_PROTOCOL_VERSION,
-                "capabilities": {},
-                "clientInfo": { "name": "probe", "version": "0" }
-            }
-        })));
-        input.extend(encode_message(json!({
-            "jsonrpc": "2.0",
-            "method": "notifications/initialized",
-            "params": {}
-        })));
-        input.extend(encode_message(json!({
-            "jsonrpc": "2.0",
-            "id": 2,
-            "method": "tools/list",
-            "params": {}
-        })));
-
-        let input = Cursor::new(input);
-        let mut output = Vec::new();
-
-        run_stdio(config, input, &mut output).expect("stdio loop succeeds");
-
-        let responses = decode_messages(&output);
-        assert_eq!(responses.len(), 2);
-        assert_eq!(responses[0]["id"], 1);
-        assert_eq!(responses[0]["result"]["serverInfo"]["name"], SERVER_NAME);
-        assert_eq!(responses[1]["id"], 2);
-        assert!(responses[1]["result"]["tools"]
-            .as_array()
-            .expect("tools/list returns an array")
-            .iter()
-            .any(|tool| tool["name"] == "browser_navigate"));
-    }
-
-    #[test]
-    fn stdio_initialize_and_list_use_line_delimited_transport() {
-        let config = McpServerConfig::new("dg-test", None, None, false);
-        let input = Cursor::new(
-            [
-                r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{"elicitation":{}},"clientInfo":{"name":"codex-mcp-client","version":"0"}}}"#,
-                r#"{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}"#,
-            ]
-            .join("\n"),
-        );
-        let mut output = Vec::new();
-
-        run_stdio(config, input, &mut output).expect("stdio loop succeeds");
-
-        let responses = decode_line_messages(&output);
-        assert_eq!(responses.len(), 2);
-        assert_eq!(responses[0]["id"], 1);
-        assert_eq!(responses[0]["result"]["protocolVersion"], "2025-06-18");
-        assert_eq!(responses[1]["id"], 2);
-        assert!(responses[1]["result"]["tools"]
-            .as_array()
-            .expect("tools/list returns an array")
-            .iter()
-            .any(|tool| tool["name"] == "browser_navigate"));
-    }
-
-    #[test]
-    fn initialize_and_tools_list_do_not_resolve_cdp_endpoint() {
-        let config = McpServerConfig::new("dg-test", None, None, true);
-        let mut runtime = McpRuntime::new(config);
-
-        handle_message(
-            &mut runtime,
-            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#,
-        )
-        .expect("initialize succeeds");
-        handle_message(
-            &mut runtime,
-            r#"{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}"#,
-        )
-        .expect("tools/list succeeds");
-
-        assert_eq!(runtime.managed_cdp_endpoint, None);
-        assert_eq!(runtime.active_browser, MANAGED_BROWSER_NAME);
-    }
-
-    #[test]
-    fn initialize_negotiates_legacy_protocol_version() {
-        let config = McpServerConfig::new("dg-test", None, None, false);
-        let mut runtime = McpRuntime::new(config);
-
-        let response = handle_message(
-            &mut runtime,
-            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"probe","version":"0"}}}"#,
-        )
-        .expect("initialize succeeds")
-        .expect("request with id returns a response");
-
-        assert_eq!(response["result"]["protocolVersion"], "2024-11-05");
-        assert_eq!(
-            response["result"]["capabilities"]["tools"]["listChanged"],
-            false
-        );
-    }
-
-    #[test]
-    fn initialize_negotiates_latest_protocol_version() {
-        let config = McpServerConfig::new("dg-test", None, None, false);
-        let mut runtime = McpRuntime::new(config);
-
-        let response = handle_message(
-            &mut runtime,
-            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{"roots":{"listChanged":true}},"clientInfo":{"name":"claude-code","version":"2.1.160"}}}"#,
-        )
-        .expect("initialize succeeds")
-        .expect("request with id returns a response");
-
-        assert_eq!(response["result"]["protocolVersion"], "2025-11-25");
-    }
-
-    #[test]
-    fn initialize_negotiates_previous_protocol_version() {
-        let config = McpServerConfig::new("dg-test", None, None, false);
-        let mut runtime = McpRuntime::new(config);
-
-        let response = handle_message(
-            &mut runtime,
-            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{"elicitation":{}},"clientInfo":{"name":"codex-mcp-client","version":"0"}}}"#,
-        )
-        .expect("initialize succeeds")
-        .expect("request with id returns a response");
-
-        assert_eq!(response["result"]["protocolVersion"], "2025-06-18");
-    }
-
-    #[test]
-    fn initialize_rejects_unknown_protocol_version() {
-        let config = McpServerConfig::new("dg-test", None, None, false);
-        let mut runtime = McpRuntime::new(config);
-
-        let response = handle_message(
-            &mut runtime,
-            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2099-01-01","capabilities":{},"clientInfo":{"name":"probe","version":"0"}}}"#,
-        )
-        .expect("initialize response serializes")
-        .expect("request with id returns a response");
-
-        assert_eq!(response["error"]["code"], -32602);
-        assert!(response["error"]["message"]
-            .as_str()
-            .expect("error message exists")
-            .contains("Unsupported MCP protocol version"));
-    }
-
-    #[test]
-    fn tools_call_resolves_cdp_endpoint_lazily() {
-        let config = McpServerConfig::new("dg-test", None, None, false);
-        let mut runtime = McpRuntime::new(config);
-        let expected_cdp_url = render_cdp_url();
-
-        let response = handle_message(
-            &mut runtime,
-            r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"unknown","arguments":{}}}"#,
-        )
-        .expect("tools/call response serializes")
-        .expect("request with id returns a response");
-
-        assert_eq!(
-            runtime.managed_cdp_endpoint.as_deref(),
-            Some(expected_cdp_url.as_str())
-        );
-        assert_eq!(response["id"], 3);
-        assert_eq!(response["result"]["isError"], true);
-        assert!(response["result"]["content"][0]["text"]
-            .as_str()
-            .expect("tool result text exists")
-            .contains("Unknown browser-connection tool"));
-    }
-
-    #[test]
-    fn configured_personal_browser_can_be_active_without_docker() {
-        let config = McpServerConfig::new("dg-test", None, None, true)
-            .with_browser_endpoints(vec![NamedBrowserEndpoint::new(
-                PERSONAL_BROWSER_NAME,
-                "http://127.0.0.1:9333",
-            )
-            .expect("endpoint is valid")])
-            .with_active_browser(Some(PERSONAL_BROWSER_NAME.to_string()))
-            .expect("active browser name is valid");
-        let mut runtime = McpRuntime::new(config);
-
-        assert_eq!(
-            runtime.cdp_endpoint().expect("personal endpoint resolves"),
-            "http://127.0.0.1:9333"
-        );
-        assert_eq!(runtime.managed_cdp_endpoint, None);
-    }
-
-    #[test]
-    fn browser_select_registers_ad_hoc_personal_endpoint_without_resolving_managed_browser() {
-        let config = McpServerConfig::new("dg-test", None, None, true);
-        let mut runtime = McpRuntime::new(config);
-
-        let response = handle_message(
-            &mut runtime,
-            r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"browser_select","arguments":{"name":"personal","cdp_endpoint":"http://127.0.0.1:9444"}}}"#,
-        )
-        .expect("browser_select response serializes")
-        .expect("request with id returns a response");
-
-        assert_eq!(response["id"], 4);
-        assert_eq!(response["result"]["isError"], false);
-        assert_eq!(runtime.active_browser, PERSONAL_BROWSER_NAME);
-        assert_eq!(runtime.managed_cdp_endpoint, None);
-        assert_eq!(
-            runtime.cdp_endpoint().expect("personal endpoint resolves"),
-            "http://127.0.0.1:9444"
-        );
-    }
-
-    #[test]
-    fn browser_list_reports_active_personal_browser() {
-        let config = McpServerConfig::new("dg-test", None, None, false)
-            .with_browser_endpoints(vec![NamedBrowserEndpoint::new(
-                PERSONAL_BROWSER_NAME,
-                "http://127.0.0.1:9222",
-            )
-            .expect("endpoint is valid")])
-            .with_active_browser(Some(PERSONAL_BROWSER_NAME.to_string()))
-            .expect("active browser name is valid");
-        let runtime = McpRuntime::new(config);
-
-        let inventory = runtime.browser_inventory();
-
-        assert_eq!(inventory["active"], PERSONAL_BROWSER_NAME);
-        assert!(inventory["browsers"]
-            .as_array()
-            .expect("browsers array")
-            .iter()
-            .any(|browser| {
-                browser["name"] == PERSONAL_BROWSER_NAME
-                    && browser["kind"] == "personal"
-                    && browser["active"] == true
-            }));
-    }
-}
+mod tests;

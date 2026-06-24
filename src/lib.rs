@@ -18,6 +18,7 @@ mod browser;
 mod browser_target;
 pub mod cdp;
 pub mod mcp;
+pub mod shared_browser;
 
 use crate::browser::DockerBrowserShell;
 use anyhow::Result;
@@ -27,6 +28,8 @@ use std::env;
 pub const BROWSER_VNC_PORT: u16 = 5900;
 pub const BROWSER_NOVNC_PORT: u16 = 6080;
 pub const BROWSER_CDP_PORT: u16 = 9223;
+pub const BROWSER_TARGET_NOVNC_PORT_OFFSET: u16 = 400;
+pub const BROWSER_CONTROL_PANEL_PORT_OFFSET: u16 = 800;
 const DOCKER_GIT_CONTAINER_PREFIX: &str = "dg-";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -60,6 +63,27 @@ pub fn compute_browser_ports(project_id: &str) -> BrowserPorts {
     }
 }
 
+pub fn compute_browser_target_novnc_port(project_id: &str, browser_name: &str) -> u16 {
+    let normalized = normalize_project_container_name(project_id);
+    let key = format!("{normalized}:{}", browser_name.trim());
+    let hash = key.bytes().fold(0u32, |acc, byte| {
+        acc.wrapping_mul(31).wrapping_add(u32::from(byte))
+    });
+    let offset = (hash % 400) as u16;
+
+    BROWSER_NOVNC_PORT + BROWSER_TARGET_NOVNC_PORT_OFFSET + offset
+}
+
+pub fn compute_browser_control_panel_port(project_id: &str) -> u16 {
+    let normalized = normalize_project_container_name(project_id);
+    let hash = normalized.bytes().fold(0u32, |acc, byte| {
+        acc.wrapping_mul(31).wrapping_add(u32::from(byte))
+    });
+    let offset = (hash % 400) as u16;
+
+    BROWSER_NOVNC_PORT + BROWSER_CONTROL_PANEL_PORT_OFFSET + offset
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct BrowserSpec {
     pub project_id: String,
@@ -69,6 +93,18 @@ pub struct BrowserSpec {
     pub volume_name: String,
     pub network_mode: String,
     pub ports: BrowserPorts,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct BrowserTargetDisplaySpec {
+    pub project_id: String,
+    pub browser_name: String,
+    pub main_container_name: String,
+    pub container_name: String,
+    pub image_name: String,
+    pub network_mode: String,
+    pub vnc_endpoint: String,
+    pub novnc_port: u16,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
@@ -110,6 +146,15 @@ pub struct BrowserStopInfo {
     pub project_id: String,
     pub container_name: String,
     pub removed: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct BrowserTargetDisplayInfo {
+    pub project_id: String,
+    pub browser_name: String,
+    pub container_name: String,
+    pub vnc_endpoint: String,
+    pub novnc_url: String,
 }
 
 fn resolved_or<F>(resolve: &F, name: &str, fallback: String) -> String
@@ -231,6 +276,75 @@ pub fn browser_spec_from_env(project_id: &str, network: Option<&str>) -> Browser
     browser_spec_from_resolver(project_id, network, env_value)
 }
 
+fn browser_target_display_spec_from_resolver<F>(
+    project_id: &str,
+    network: Option<&str>,
+    browser_name: &str,
+    vnc_endpoint: &str,
+    resolve: F,
+) -> BrowserTargetDisplaySpec
+where
+    F: Fn(&str) -> Option<String>,
+{
+    let browser_spec = browser_spec_from_resolver(project_id, network, resolve);
+    let browser_name = browser_name.trim();
+    let novnc_port = compute_browser_target_novnc_port(&browser_spec.project_id, browser_name);
+    let network_mode = display_proxy_network_mode(&browser_spec.network_mode);
+
+    BrowserTargetDisplaySpec {
+        project_id: browser_spec.project_id,
+        browser_name: browser_name.to_string(),
+        main_container_name: browser_spec.main_container_name,
+        container_name: format!("{}-novnc-{browser_name}", browser_spec.container_name),
+        image_name: format!(
+            "{}-novnc-proxy:docker-git-browser",
+            browser_spec.container_name
+        ),
+        network_mode,
+        vnc_endpoint: vnc_endpoint.trim().to_string(),
+        novnc_port,
+    }
+}
+
+fn display_proxy_network_mode(managed_network_mode: &str) -> String {
+    let network_mode = managed_network_mode.trim();
+    if network_mode.is_empty() || network_mode.starts_with("container:") {
+        "bridge".to_string()
+    } else {
+        network_mode.to_string()
+    }
+}
+
+pub fn browser_target_display_spec_from_defaults(
+    project_id: &str,
+    network: Option<&str>,
+    browser_name: &str,
+    vnc_endpoint: &str,
+) -> BrowserTargetDisplaySpec {
+    browser_target_display_spec_from_resolver(
+        project_id,
+        network,
+        browser_name,
+        vnc_endpoint,
+        |_| None,
+    )
+}
+
+pub fn browser_target_display_spec_from_env(
+    project_id: &str,
+    network: Option<&str>,
+    browser_name: &str,
+    vnc_endpoint: &str,
+) -> BrowserTargetDisplaySpec {
+    browser_target_display_spec_from_resolver(
+        project_id,
+        network,
+        browser_name,
+        vnc_endpoint,
+        env_value,
+    )
+}
+
 // CHANGE: read browser container resource ceilings from docker-git's generated environment.
 // WHY: docker-git emits DOCKER_GIT_BROWSER_*_LIMIT for the Rust-owned browser container.
 // QUOTE(ТЗ): "When users set --playwright-cpu/--playwright-ram or rely on the defaults"
@@ -274,6 +388,22 @@ pub fn render_novnc_url_for_ports(ports: BrowserPorts) -> String {
 
 pub fn render_cdp_url_for_ports(ports: BrowserPorts) -> String {
     format!("http://127.0.0.1:{}", ports.cdp)
+}
+
+pub fn render_novnc_url_for_port(port: u16) -> String {
+    format!("http://127.0.0.1:{port}/vnc.html?autoconnect=true&resize=remote&path=websockify")
+}
+
+pub fn render_browser_target_novnc_url(project_id: &str, browser_name: &str) -> String {
+    render_novnc_url_for_port(compute_browser_target_novnc_port(project_id, browser_name))
+}
+
+pub fn render_browser_control_panel_url(project_id: &str) -> String {
+    render_browser_control_panel_url_for_port(compute_browser_control_panel_port(project_id))
+}
+
+pub fn render_browser_control_panel_url_for_port(port: u16) -> String {
+    format!("http://127.0.0.1:{port}/")
 }
 
 pub fn is_single_browser_session(cdp_url: &str, novnc_url: &str) -> bool {
@@ -324,12 +454,36 @@ impl BrowserConnection {
         })
     }
 
+    pub fn start_browser_target_display(
+        &self,
+        project_id: &str,
+        network: Option<&str>,
+        browser_name: &str,
+        vnc_endpoint: &str,
+    ) -> Result<BrowserTargetDisplayInfo> {
+        let spec =
+            browser_target_display_spec_from_env(project_id, network, browser_name, vnc_endpoint);
+        let runtime = self.shell.ensure_novnc_proxy_container(&spec)?;
+
+        Ok(BrowserTargetDisplayInfo {
+            project_id: spec.project_id,
+            browser_name: spec.browser_name,
+            container_name: runtime.container_name,
+            vnc_endpoint: runtime.vnc_endpoint,
+            novnc_url: runtime.novnc_url,
+        })
+    }
+
     pub fn get_novnc_url(&self, project_id: &str) -> String {
         render_novnc_url_for_ports(compute_browser_ports(project_id))
     }
 
     pub fn get_cdp_url(&self, project_id: &str) -> String {
         render_cdp_url_for_ports(compute_browser_ports(project_id))
+    }
+
+    pub fn get_browser_target_novnc_url(&self, project_id: &str, browser_name: &str) -> String {
+        render_browser_target_novnc_url(project_id, browser_name)
     }
 
     pub fn is_single_browser_session(&self, cdp_url: &str, novnc_url: &str) -> bool {
@@ -366,6 +520,64 @@ mod tests {
         );
         assert_eq!(spec.network_mode, "container:dg-docker-git-issue-347");
         assert_eq!(spec.ports, compute_browser_ports("dg-docker-git-issue-347"));
+    }
+
+    #[test]
+    fn target_novnc_port_is_deterministic_and_separate_from_managed_ports() {
+        let managed = compute_browser_ports("docker-git-issue-347");
+        let personal = compute_browser_target_novnc_port("docker-git-issue-347", "personal");
+
+        assert_eq!(
+            personal,
+            compute_browser_target_novnc_port("docker-git-issue-347", "personal")
+        );
+        assert!(personal >= BROWSER_NOVNC_PORT + BROWSER_TARGET_NOVNC_PORT_OFFSET);
+        assert_ne!(personal, managed.novnc);
+    }
+
+    #[test]
+    fn control_panel_port_is_deterministic_and_separate_from_browser_ports() {
+        let managed = compute_browser_ports("docker-git-issue-347");
+        let control = compute_browser_control_panel_port("docker-git-issue-347");
+
+        assert_eq!(
+            control,
+            compute_browser_control_panel_port("docker-git-issue-347")
+        );
+        assert!(control >= BROWSER_NOVNC_PORT + BROWSER_CONTROL_PANEL_PORT_OFFSET);
+        assert_ne!(control, managed.novnc);
+        assert_ne!(control, managed.cdp);
+    }
+
+    #[test]
+    fn target_display_spec_derives_names_from_browser_spec() {
+        let spec = browser_target_display_spec_from_defaults(
+            "docker-git-issue-347",
+            Some("bridge"),
+            "personal",
+            "host.docker.internal:5900",
+        );
+
+        assert_eq!(spec.project_id, "docker-git-issue-347");
+        assert_eq!(spec.browser_name, "personal");
+        assert_eq!(
+            spec.container_name,
+            "dg-docker-git-issue-347-browser-novnc-personal"
+        );
+        assert_eq!(spec.network_mode, "bridge");
+        assert_eq!(spec.vnc_endpoint, "host.docker.internal:5900");
+    }
+
+    #[test]
+    fn target_display_spec_uses_bridge_when_managed_browser_uses_project_namespace() {
+        let spec = browser_target_display_spec_from_defaults(
+            "docker-git-issue-347",
+            Some("container:dg-docker-git-issue-347"),
+            "personal",
+            "host.docker.internal:5900",
+        );
+
+        assert_eq!(spec.network_mode, "bridge");
     }
 
     #[test]
