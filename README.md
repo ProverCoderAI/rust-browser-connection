@@ -47,6 +47,43 @@ args = ["--project", "dg-my-project"]
 
 Use `browser-connection`, not `npx @playwright/mcp`. The MCP server starts/reuses the same Rust-managed browser container automatically.
 
+## Personal browser
+
+You can attach an already running desktop Chrome/Chromium browser if it exposes a CDP port:
+
+```bash
+google-chrome --remote-debugging-port=9222 --user-data-dir="$HOME/.browser-connection-personal"
+```
+
+Then point the MCP server at that browser:
+
+```toml
+[mcp_servers.playwright]
+command = "browser-connection"
+args = ["--project", "dg-my-project", "--personal-browser", "http://127.0.0.1:9222"]
+```
+
+Multiple browser targets can be configured and switched at runtime:
+
+```toml
+[mcp_servers.playwright]
+command = "browser-connection"
+args = [
+  "--project", "dg-my-project",
+  "--browser", "personal=http://127.0.0.1:9222",
+  "--browser", "work=http://127.0.0.1:9333",
+  "--active-browser", "personal",
+]
+```
+
+Environment alternatives:
+
+```bash
+export BROWSER_CONNECTION_PERSONAL_CDP_ENDPOINT=http://127.0.0.1:9222
+export BROWSER_CONNECTION_BROWSERS=work=http://127.0.0.1:9333
+export BROWSER_CONNECTION_ACTIVE_BROWSER=personal
+```
+
 ## Hermes MCP config
 
 `~/.hermes/config.yaml`:
@@ -70,7 +107,11 @@ browser_click(selector)
 browser_type(selector, text)
 browser_press_key(key)
 browser_take_screenshot(full_page?)
+browser_list()
+browser_select(name, cdp_endpoint?)
 ```
+
+Use `browser_select` with `name=managed` to return to the Rust-managed noVNC/CDP browser, or with `name=personal` and `cdp_endpoint=http://127.0.0.1:9222` to connect a personal browser without restarting the MCP server.
 
 ## Smoke test
 

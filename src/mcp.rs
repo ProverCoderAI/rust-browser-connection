@@ -7,17 +7,26 @@ REF: https://github.com/ProverCoderAI/docker-git/issues/347
 SOURCE: n/a
 FORMAT THEOREM: initialize ∧ tools/list -> MCP-compatible JSON-RPC responses with browser tools.
 PURITY: SHELL
-EFFECT: stdio JSON-RPC and optional CDP/browser Docker startup.
-INVARIANT: MCP startup resolves exactly one CDP endpoint from BrowserConnection or an explicit override.
+EFFECT: stdio JSON-RPC, optional CDP/browser Docker startup, and active browser target selection.
+INVARIANT: browser tools always target the active CDP endpoint: managed, explicit, or configured.
 */
 
+use crate::browser_target::{
+    configured_browser_kind, normalize_browser_name, normalize_cdp_endpoint,
+    upsert_browser_endpoint,
+};
 use crate::cdp::CdpClient;
-use crate::{render_cdp_url, BrowserConnection};
+use crate::{compute_browser_ports, render_cdp_url, render_cdp_url_for_ports, BrowserConnection};
 use anyhow::{anyhow, Context, Result};
 use serde_json::{json, Value};
 use std::env;
 use std::io::{BufRead, Write};
 
+pub use crate::browser_target::{
+    active_browser_from_env, browser_endpoints_from_env, parse_named_browser_endpoint,
+    parse_named_browser_endpoints, NamedBrowserEndpoint, EXPLICIT_BROWSER_NAME,
+    MANAGED_BROWSER_NAME, PERSONAL_BROWSER_NAME,
+};
 pub const SERVER_NAME: &str = "browser-connection";
 pub const MCP_PROTOCOL_VERSION: &str = "2025-11-25";
 pub const PREVIOUS_MCP_PROTOCOL_VERSION: &str = "2025-06-18";
@@ -36,6 +45,8 @@ pub struct McpServerConfig {
     pub network: Option<String>,
     pub cdp_endpoint: Option<String>,
     pub start_browser: bool,
+    pub browser_endpoints: Vec<NamedBrowserEndpoint>,
+    pub active_browser: Option<String>,
 }
 
 impl McpServerConfig {
@@ -50,7 +61,24 @@ impl McpServerConfig {
             network,
             cdp_endpoint,
             start_browser,
+            browser_endpoints: Vec::new(),
+            active_browser: None,
         }
+    }
+
+    pub fn with_browser_endpoints(mut self, endpoints: Vec<NamedBrowserEndpoint>) -> Self {
+        for endpoint in endpoints {
+            upsert_browser_endpoint(&mut self.browser_endpoints, endpoint);
+        }
+        self
+    }
+
+    pub fn with_active_browser(mut self, active_browser: Option<String>) -> Result<Self> {
+        self.active_browser = active_browser
+            .as_deref()
+            .map(normalize_browser_name)
+            .transpose()?;
+        Ok(self)
     }
 }
 
@@ -74,8 +102,9 @@ where
     while let Some(message) = read_message(&mut reader, &mut transport)? {
         match handle_message(&mut runtime, &message) {
             Ok(Some(response)) => {
-                let transport = transport
-                    .ok_or_else(|| anyhow!("stdio transport was unknown after reading a message"))?;
+                let transport = transport.ok_or_else(|| {
+                    anyhow!("stdio transport was unknown after reading a message")
+                })?;
                 write_message(&mut writer, &response, transport)?;
             }
             Ok(None) => {}
@@ -97,38 +126,185 @@ where
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct McpRuntime {
     config: McpServerConfig,
-    cdp_endpoint: Option<String>,
+    managed_cdp_endpoint: Option<String>,
+    active_browser: String,
 }
 
 impl McpRuntime {
     fn new(config: McpServerConfig) -> Self {
+        let active_browser = config.active_browser.clone().unwrap_or_else(|| {
+            if has_explicit_cdp_endpoint(&config) {
+                EXPLICIT_BROWSER_NAME.to_string()
+            } else {
+                MANAGED_BROWSER_NAME.to_string()
+            }
+        });
+
         Self {
             config,
-            cdp_endpoint: None,
+            managed_cdp_endpoint: None,
+            active_browser,
         }
     }
 
-    fn cdp_endpoint(&mut self) -> Result<&str> {
-        if self.cdp_endpoint.is_none() {
-            self.cdp_endpoint = Some(resolve_cdp_endpoint(&self.config)?);
+    fn cdp_endpoint(&mut self) -> Result<String> {
+        match self.active_browser.as_str() {
+            MANAGED_BROWSER_NAME => self.managed_cdp_endpoint(),
+            EXPLICIT_BROWSER_NAME => explicit_cdp_endpoint(&self.config)
+                .ok_or_else(|| anyhow!("explicit CDP endpoint is not configured")),
+            name => self
+                .config
+                .browser_endpoints
+                .iter()
+                .find(|endpoint| endpoint.name == name)
+                .map(|endpoint| endpoint.cdp_endpoint.clone())
+                .ok_or_else(|| {
+                    anyhow!(
+                        "Unknown browser `{name}`. Available browsers: {}",
+                        self.available_browser_names().join(", ")
+                    )
+                }),
+        }
+    }
+
+    fn managed_cdp_endpoint(&mut self) -> Result<String> {
+        if self.managed_cdp_endpoint.is_none() {
+            self.managed_cdp_endpoint = Some(resolve_managed_cdp_endpoint(&self.config)?);
         }
 
-        self.cdp_endpoint
-            .as_deref()
-            .ok_or_else(|| anyhow!("CDP endpoint cache was empty after resolution"))
+        self.managed_cdp_endpoint
+            .clone()
+            .ok_or_else(|| anyhow!("managed CDP endpoint cache was empty after resolution"))
+    }
+
+    fn browser_inventory_text(&self) -> Result<String> {
+        serde_json::to_string_pretty(&self.browser_inventory())
+            .context("failed to render browser inventory")
+    }
+
+    fn browser_inventory(&self) -> Value {
+        let mut browsers = vec![self.managed_browser_entry()];
+
+        if let Some(endpoint) = explicit_cdp_endpoint(&self.config) {
+            browsers.push(browser_entry(
+                EXPLICIT_BROWSER_NAME,
+                "explicit",
+                Some(endpoint),
+                "configured",
+                self.active_browser == EXPLICIT_BROWSER_NAME,
+            ));
+        }
+
+        for endpoint in &self.config.browser_endpoints {
+            browsers.push(browser_entry(
+                &endpoint.name,
+                configured_browser_kind(&endpoint.name),
+                Some(endpoint.cdp_endpoint.clone()),
+                "configured",
+                self.active_browser == endpoint.name,
+            ));
+        }
+
+        json!({
+            "active": self.active_browser,
+            "browsers": browsers
+        })
+    }
+
+    fn managed_browser_entry(&self) -> Value {
+        let cached_endpoint = self.managed_cdp_endpoint.clone();
+        let endpoint = cached_endpoint
+            .clone()
+            .or_else(|| (!self.config.start_browser).then(render_cdp_url))
+            .or_else(|| {
+                let ports = compute_browser_ports(&self.config.project_id);
+                Some(render_cdp_url_for_ports(ports))
+            });
+        let resolution = if cached_endpoint.is_some() {
+            "resolved"
+        } else if self.config.start_browser {
+            "auto-start"
+        } else {
+            "default-localhost"
+        };
+
+        browser_entry(
+            MANAGED_BROWSER_NAME,
+            "managed",
+            endpoint,
+            resolution,
+            self.active_browser == MANAGED_BROWSER_NAME,
+        )
+    }
+
+    fn select_browser(&mut self, name: &str, cdp_endpoint: Option<&str>) -> Result<String> {
+        let name = normalize_browser_name(name)?;
+
+        if let Some(endpoint) = cdp_endpoint {
+            if name == MANAGED_BROWSER_NAME || name == EXPLICIT_BROWSER_NAME {
+                return Err(anyhow!(
+                    "`{name}` is reserved; choose a custom name such as `{PERSONAL_BROWSER_NAME}`"
+                ));
+            }
+            let endpoint = NamedBrowserEndpoint::new(&name, endpoint)?;
+            upsert_browser_endpoint(&mut self.config.browser_endpoints, endpoint);
+        } else {
+            self.ensure_browser_exists(&name)?;
+        }
+
+        self.active_browser = name;
+        serde_json::to_string_pretty(&json!({
+            "selected": self.active_browser,
+            "browser": self.browser_inventory()
+                .get("browsers")
+                .and_then(Value::as_array)
+                .and_then(|browsers| browsers.iter().find(|browser| {
+                    browser.get("name").and_then(Value::as_str) == Some(self.active_browser.as_str())
+                }))
+                .cloned()
+                .unwrap_or(Value::Null)
+        }))
+        .context("failed to render browser selection")
+    }
+
+    fn ensure_browser_exists(&self, name: &str) -> Result<()> {
+        if name == MANAGED_BROWSER_NAME {
+            return Ok(());
+        }
+        if name == EXPLICIT_BROWSER_NAME && has_explicit_cdp_endpoint(&self.config) {
+            return Ok(());
+        }
+        if self
+            .config
+            .browser_endpoints
+            .iter()
+            .any(|endpoint| endpoint.name == name)
+        {
+            return Ok(());
+        }
+
+        Err(anyhow!(
+            "Unknown browser `{name}`. Available browsers: {}",
+            self.available_browser_names().join(", ")
+        ))
+    }
+
+    fn available_browser_names(&self) -> Vec<String> {
+        let mut names = vec![MANAGED_BROWSER_NAME.to_string()];
+        if has_explicit_cdp_endpoint(&self.config) {
+            names.push(EXPLICIT_BROWSER_NAME.to_string());
+        }
+        names.extend(
+            self.config
+                .browser_endpoints
+                .iter()
+                .map(|endpoint| endpoint.name.clone()),
+        );
+        names
     }
 }
 
-fn resolve_cdp_endpoint(config: &McpServerConfig) -> Result<String> {
-    if let Some(endpoint) = config
-        .cdp_endpoint
-        .as_deref()
-        .map(str::trim)
-        .filter(|endpoint| !endpoint.is_empty())
-    {
-        return Ok(endpoint.to_string());
-    }
-
+fn resolve_managed_cdp_endpoint(config: &McpServerConfig) -> Result<String> {
     if !config.start_browser {
         return Ok(render_cdp_url());
     }
@@ -136,6 +312,33 @@ fn resolve_cdp_endpoint(config: &McpServerConfig) -> Result<String> {
     let connection = BrowserConnection::new()?;
     let info = connection.start_browser(&config.project_id, config.network.as_deref())?;
     Ok(info.cdp_url)
+}
+
+fn explicit_cdp_endpoint(config: &McpServerConfig) -> Option<String> {
+    config
+        .cdp_endpoint
+        .as_deref()
+        .and_then(|endpoint| normalize_cdp_endpoint(endpoint).ok())
+}
+
+fn has_explicit_cdp_endpoint(config: &McpServerConfig) -> bool {
+    explicit_cdp_endpoint(config).is_some()
+}
+
+fn browser_entry(
+    name: &str,
+    kind: &str,
+    cdp_endpoint: Option<String>,
+    resolution: &str,
+    active: bool,
+) -> Value {
+    json!({
+        "name": name,
+        "kind": kind,
+        "cdpEndpoint": cdp_endpoint,
+        "resolution": resolution,
+        "active": active
+    })
 }
 
 fn read_message<R: BufRead>(
@@ -341,8 +544,23 @@ fn initialize_result(protocol_version: &str) -> Value {
 fn tool_definitions() -> Vec<Value> {
     vec![
         tool(
+            "browser_list",
+            "List available browser targets and show which target is active.",
+            json!({}),
+            vec![],
+        ),
+        tool(
+            "browser_select",
+            "Switch the active browser target by name, optionally registering a CDP endpoint first.",
+            json!({
+                "name": { "type": "string", "description": "Browser target name, e.g. managed or personal" },
+                "cdp_endpoint": { "type": "string", "description": "Optional CDP endpoint to register for this browser name" }
+            }),
+            vec!["name"],
+        ),
+        tool(
             "browser_navigate",
-            "Navigate the noVNC-visible Chromium page to a URL through the Rust CDP adapter.",
+            "Navigate the active browser page to a URL through the Rust CDP adapter.",
             json!({ "url": { "type": "string", "description": "Absolute URL to open" } }),
             vec!["url"],
         ),
@@ -405,9 +623,16 @@ fn handle_tool_call(runtime: &mut McpRuntime, request: &Value) -> Value {
     let name = params.get("name").and_then(Value::as_str).unwrap_or("");
     let arguments = params.get("arguments").unwrap_or(&Value::Null);
 
-    let result = runtime
-        .cdp_endpoint()
-        .and_then(|cdp_endpoint| dispatch_tool(cdp_endpoint, name, arguments));
+    let result = match name {
+        "browser_list" => runtime.browser_inventory_text(),
+        "browser_select" => runtime.select_browser(
+            required_str(arguments, "name").unwrap_or(""),
+            arguments.get("cdp_endpoint").and_then(Value::as_str),
+        ),
+        _ => runtime
+            .cdp_endpoint()
+            .and_then(|cdp_endpoint| dispatch_tool(&cdp_endpoint, name, arguments)),
+    };
     match result {
         Ok(text) => tool_result(text, false),
         Err(error) => tool_result(format!("{error:#}"), true),
@@ -488,7 +713,9 @@ mod tests {
         let mut responses = Vec::new();
 
         let mut transport = Some(StdioTransport::Framed);
-        while let Some(message) = read_message(&mut cursor, &mut transport).expect("stdout frame parses") {
+        while let Some(message) =
+            read_message(&mut cursor, &mut transport).expect("stdout frame parses")
+        {
             responses.push(serde_json::from_str(&message).expect("stdout frame body is JSON"));
         }
 
@@ -596,7 +823,8 @@ mod tests {
         )
         .expect("tools/list succeeds");
 
-        assert_eq!(runtime.cdp_endpoint, None);
+        assert_eq!(runtime.managed_cdp_endpoint, None);
+        assert_eq!(runtime.active_browser, MANAGED_BROWSER_NAME);
     }
 
     #[test]
@@ -612,7 +840,10 @@ mod tests {
         .expect("request with id returns a response");
 
         assert_eq!(response["result"]["protocolVersion"], "2024-11-05");
-        assert_eq!(response["result"]["capabilities"]["tools"]["listChanged"], false);
+        assert_eq!(
+            response["result"]["capabilities"]["tools"]["listChanged"],
+            false
+        );
     }
 
     #[test]
@@ -678,7 +909,7 @@ mod tests {
         .expect("request with id returns a response");
 
         assert_eq!(
-            runtime.cdp_endpoint.as_deref(),
+            runtime.managed_cdp_endpoint.as_deref(),
             Some(expected_cdp_url.as_str())
         );
         assert_eq!(response["id"], 3);
@@ -687,5 +918,72 @@ mod tests {
             .as_str()
             .expect("tool result text exists")
             .contains("Unknown browser-connection tool"));
+    }
+
+    #[test]
+    fn configured_personal_browser_can_be_active_without_docker() {
+        let config = McpServerConfig::new("dg-test", None, None, true)
+            .with_browser_endpoints(vec![NamedBrowserEndpoint::new(
+                PERSONAL_BROWSER_NAME,
+                "http://127.0.0.1:9333",
+            )
+            .expect("endpoint is valid")])
+            .with_active_browser(Some(PERSONAL_BROWSER_NAME.to_string()))
+            .expect("active browser name is valid");
+        let mut runtime = McpRuntime::new(config);
+
+        assert_eq!(
+            runtime.cdp_endpoint().expect("personal endpoint resolves"),
+            "http://127.0.0.1:9333"
+        );
+        assert_eq!(runtime.managed_cdp_endpoint, None);
+    }
+
+    #[test]
+    fn browser_select_registers_ad_hoc_personal_endpoint_without_resolving_managed_browser() {
+        let config = McpServerConfig::new("dg-test", None, None, true);
+        let mut runtime = McpRuntime::new(config);
+
+        let response = handle_message(
+            &mut runtime,
+            r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"browser_select","arguments":{"name":"personal","cdp_endpoint":"http://127.0.0.1:9444"}}}"#,
+        )
+        .expect("browser_select response serializes")
+        .expect("request with id returns a response");
+
+        assert_eq!(response["id"], 4);
+        assert_eq!(response["result"]["isError"], false);
+        assert_eq!(runtime.active_browser, PERSONAL_BROWSER_NAME);
+        assert_eq!(runtime.managed_cdp_endpoint, None);
+        assert_eq!(
+            runtime.cdp_endpoint().expect("personal endpoint resolves"),
+            "http://127.0.0.1:9444"
+        );
+    }
+
+    #[test]
+    fn browser_list_reports_active_personal_browser() {
+        let config = McpServerConfig::new("dg-test", None, None, false)
+            .with_browser_endpoints(vec![NamedBrowserEndpoint::new(
+                PERSONAL_BROWSER_NAME,
+                "http://127.0.0.1:9222",
+            )
+            .expect("endpoint is valid")])
+            .with_active_browser(Some(PERSONAL_BROWSER_NAME.to_string()))
+            .expect("active browser name is valid");
+        let runtime = McpRuntime::new(config);
+
+        let inventory = runtime.browser_inventory();
+
+        assert_eq!(inventory["active"], PERSONAL_BROWSER_NAME);
+        assert!(inventory["browsers"]
+            .as_array()
+            .expect("browsers array")
+            .iter()
+            .any(|browser| {
+                browser["name"] == PERSONAL_BROWSER_NAME
+                    && browser["kind"] == "personal"
+                    && browser["active"] == true
+            }));
     }
 }
