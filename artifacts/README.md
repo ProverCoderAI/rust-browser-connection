@@ -2,7 +2,8 @@
 
 ## Edge share extension
 
-Download `edge-share-extension.tar.gz`, extract it, then open Edge:
+Download `edge-share-extension.zip` or `edge-share-extension.tar.gz`, extract it,
+then open Edge:
 
 ```text
 edge://extensions
