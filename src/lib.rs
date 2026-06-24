@@ -15,6 +15,7 @@
 */
 
 mod browser;
+mod browser_target;
 pub mod cdp;
 pub mod mcp;
 

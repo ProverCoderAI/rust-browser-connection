@@ -60,6 +60,9 @@ fn browser_connection_help_exposes_custom_mcp_command_without_npx() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("browser-connection"));
     assert!(stdout.contains("--project"));
+    assert!(stdout.contains("--browser"));
+    assert!(stdout.contains("--personal-browser"));
+    assert!(stdout.contains("--active-browser"));
     assert!(stdout.contains("--no-start-browser"));
     assert!(!stdout.contains("playwright/mcp"));
     assert!(!stdout.contains("npx"));
@@ -144,6 +147,87 @@ fn browser_connection_stdio_initializes_and_lists_browser_tools_without_docker()
     assert!(names.contains(&"browser_type"));
     assert!(names.contains(&"browser_press_key"));
     assert!(names.contains(&"browser_take_screenshot"));
+    assert!(names.contains(&"browser_list"));
+    assert!(names.contains(&"browser_select"));
+}
+
+#[test]
+fn browser_connection_stdio_selects_personal_browser_without_docker() {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_browser-connection"))
+        .args(["--project", "dg-test", "--no-start-browser"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("Failed to spawn browser-connection MCP server");
+
+    {
+        let stdin = child.stdin.as_mut().expect("stdin is piped");
+        let mut input = Vec::new();
+        input.extend(encode_message(serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": { "name": "probe", "version": "0" }
+            }
+        })));
+        input.extend(encode_message(serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": {
+                "name": "browser_select",
+                "arguments": {
+                    "name": "personal",
+                    "cdp_endpoint": "http://127.0.0.1:9444/json/version"
+                }
+            }
+        })));
+        input.extend(encode_message(serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "tools/call",
+            "params": {
+                "name": "browser_list",
+                "arguments": {}
+            }
+        })));
+        stdin
+            .write_all(&input)
+            .expect("write MCP browser selection requests");
+    }
+    drop(child.stdin.take());
+
+    let output = child
+        .wait_with_output()
+        .expect("browser-connection process exits after stdin EOF");
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let responses = decode_messages(&output.stdout);
+    assert_eq!(responses.len(), 3);
+    assert_eq!(responses[1]["result"]["isError"], false);
+    let inventory_text = responses[2]["result"]["content"][0]["text"]
+        .as_str()
+        .expect("browser_list returns text content");
+    let inventory: Value = serde_json::from_str(inventory_text).expect("browser_list text is JSON");
+
+    assert_eq!(inventory["active"], "personal");
+    assert!(inventory["browsers"]
+        .as_array()
+        .expect("browsers array")
+        .iter()
+        .any(|browser| {
+            browser["name"] == "personal"
+                && browser["cdpEndpoint"] == "http://127.0.0.1:9444"
+                && browser["active"] == true
+        }));
 }
 
 #[test]
