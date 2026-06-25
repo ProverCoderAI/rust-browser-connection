@@ -116,12 +116,23 @@ function statusLabel(state) {
     return "Unknown";
   }
   if (state.connected) {
+    if (state.platformOrigin) {
+      return `Connected to ${originLabel(state.platformOrigin)}`;
+    }
     return "Connected";
   }
   if (state.sharing) {
     return state.status || "Sharing";
   }
   return state.status || "Idle";
+}
+
+function originLabel(origin) {
+  try {
+    return new URL(origin).host;
+  } catch (_error) {
+    return origin;
+  }
 }
 
 function setBusy(busy) {

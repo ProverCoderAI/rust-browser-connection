@@ -1,6 +1,9 @@
 use super::{McpRuntime, PERSONAL_BROWSER_NAME};
+use crate::shared_browser::BrowserShareRelay;
 use anyhow::{anyhow, Context, Result};
 use serde_json::{json, Value};
+use std::fmt::Write as _;
+use std::fs::File;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::{Arc, Mutex};
@@ -22,15 +25,19 @@ pub(super) fn spawn_control_panel(runtime: Arc<Mutex<McpRuntime>>) -> Result<()>
 
     let listener = TcpListener::bind(("127.0.0.1", port))
         .with_context(|| format!("failed to bind browser control panel on 127.0.0.1:{port}"))?;
+    let relay = BrowserShareRelay::new();
+    let control_token = Arc::new(generate_control_token()?);
     thread::Builder::new()
         .name("browser-control-panel".to_string())
         .spawn(move || {
             for stream in listener.incoming().flatten() {
                 let runtime = Arc::clone(&runtime);
+                let relay = relay.clone();
+                let control_token = Arc::clone(&control_token);
                 thread::Builder::new()
                     .name("browser-control-panel-client".to_string())
                     .spawn(move || {
-                        let _ = handle_connection(runtime, stream);
+                        let _ = handle_connection(runtime, relay, control_token, stream);
                     })
                     .ok();
             }
@@ -40,12 +47,23 @@ pub(super) fn spawn_control_panel(runtime: Arc<Mutex<McpRuntime>>) -> Result<()>
     Ok(())
 }
 
-fn handle_connection(runtime: Arc<Mutex<McpRuntime>>, mut stream: TcpStream) -> Result<()> {
+fn handle_connection(
+    runtime: Arc<Mutex<McpRuntime>>,
+    relay: BrowserShareRelay,
+    control_token: Arc<String>,
+    mut stream: TcpStream,
+) -> Result<()> {
     stream.set_read_timeout(Some(Duration::from_secs(3))).ok();
     stream.set_write_timeout(Some(Duration::from_secs(3))).ok();
 
+    if is_relay_websocket_request(&stream)? {
+        return relay
+            .handle_stream(stream)
+            .context("failed to handle embedded browser share relay client");
+    }
+
     let request = read_http_request(&mut stream)?;
-    let response = route_request(runtime, &request);
+    let response = route_request(runtime, control_token.as_str(), &request);
     write_http_response(&mut stream, response)
 }
 
@@ -53,6 +71,7 @@ fn handle_connection(runtime: Arc<Mutex<McpRuntime>>, mut stream: TcpStream) -> 
 struct HttpRequest {
     method: String,
     target: String,
+    headers: Vec<(String, String)>,
     body: String,
 }
 
@@ -100,6 +119,28 @@ fn read_http_request(stream: &mut TcpStream) -> Result<HttpRequest> {
     parse_http_request(&data)
 }
 
+fn is_relay_websocket_request(stream: &TcpStream) -> Result<bool> {
+    let mut data = [0_u8; 2048];
+    let read = stream
+        .peek(&mut data)
+        .context("failed to peek control panel request")?;
+    if read == 0 {
+        return Ok(false);
+    }
+    let head = String::from_utf8_lossy(&data[..read]);
+    let Some(request_line) = head.lines().next() else {
+        return Ok(false);
+    };
+    let mut parts = request_line.split_whitespace();
+    let method = parts.next().unwrap_or_default();
+    let target = parts.next().unwrap_or_default();
+    Ok(method.eq_ignore_ascii_case("GET") && is_relay_path(request_path(target)))
+}
+
+fn is_relay_path(path: &str) -> bool {
+    path.starts_with("/ws/browser/") || path.starts_with("/ws/agent/")
+}
+
 fn header_end(data: &[u8]) -> Option<usize> {
     data.windows(4).position(|window| window == b"\r\n\r\n")
 }
@@ -136,22 +177,51 @@ fn parse_http_request(data: &[u8]) -> Result<HttpRequest> {
         .next()
         .ok_or_else(|| anyhow!("HTTP target missing"))?
         .to_string();
+    let headers = head
+        .lines()
+        .skip(1)
+        .filter_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            Some((name.trim().to_ascii_lowercase(), value.trim().to_string()))
+        })
+        .collect();
     let body = String::from_utf8_lossy(&data[header_end + 4..]).to_string();
 
     Ok(HttpRequest {
         method,
         target,
+        headers,
         body,
     })
 }
 
-fn route_request(runtime: Arc<Mutex<McpRuntime>>, request: &HttpRequest) -> HttpResponse {
+fn route_request(
+    runtime: Arc<Mutex<McpRuntime>>,
+    control_token: &str,
+    request: &HttpRequest,
+) -> HttpResponse {
     match (request.method.as_str(), request_path(&request.target)) {
         ("OPTIONS", _) => empty_response(204, "No Content"),
-        ("GET", "/") | ("GET", "/index.html") => html_response(control_panel_html()),
+        ("GET", "/") | ("GET", "/index.html") => control_panel_response(runtime, control_token),
         ("GET", "/api/browsers") => browser_inventory_response(runtime),
-        ("POST", "/api/share") | ("GET", "/api/share") => register_share_response(runtime, request),
+        ("POST", "/api/share") | ("GET", "/api/share") => {
+            if !has_valid_control_token(request, control_token) {
+                return json_response(
+                    403,
+                    "Forbidden",
+                    json!({ "error": "invalid control token" }),
+                );
+            }
+            register_share_response(runtime, request)
+        }
         ("POST", "/api/select") | ("GET", "/api/select") => {
+            if !has_valid_control_token(request, control_token) {
+                return json_response(
+                    403,
+                    "Forbidden",
+                    json!({ "error": "invalid control token" }),
+                );
+            }
             select_browser_response(runtime, request)
         }
         _ => json_response(404, "Not Found", json!({ "error": "not found" })),
@@ -163,6 +233,31 @@ fn request_path(target: &str) -> &str {
         .split_once('?')
         .map(|(path, _)| path)
         .unwrap_or(target)
+}
+
+fn control_panel_response(runtime: Arc<Mutex<McpRuntime>>, control_token: &str) -> HttpResponse {
+    let project_id = runtime
+        .lock()
+        .map(|runtime| runtime.config.project_id.clone())
+        .unwrap_or_else(|_| "browser-connection".to_string());
+    html_response(control_panel_html(control_token, &project_id))
+}
+
+fn has_valid_control_token(request: &HttpRequest, control_token: &str) -> bool {
+    let provided = request
+        .header("x-browser-control-token")
+        .or_else(|| query_param(&request.target, "control_token"))
+        .or_else(|| query_param(&request.body, "control_token"));
+    provided.as_deref() == Some(control_token)
+}
+
+impl HttpRequest {
+    fn header(&self, name: &str) -> Option<String> {
+        let name = name.to_ascii_lowercase();
+        self.headers
+            .iter()
+            .find_map(|(key, value)| (key == &name).then(|| value.clone()))
+    }
 }
 
 fn browser_inventory_response(runtime: Arc<Mutex<McpRuntime>>) -> HttpResponse {
@@ -278,7 +373,7 @@ fn hex_value(byte: u8) -> Option<u8> {
 fn write_http_response(stream: &mut TcpStream, response: HttpResponse) -> Result<()> {
     write!(
         stream,
-        "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nCache-Control: no-store\r\nConnection: close\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, POST, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type\r\n\r\n",
+        "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n",
         response.status,
         response.reason,
         response.content_type,
@@ -322,7 +417,36 @@ fn json_response(status: u16, reason: &'static str, value: Value) -> HttpRespons
     }
 }
 
-fn control_panel_html() -> String {
+fn generate_control_token() -> Result<String> {
+    let mut bytes = [0_u8; 32];
+    File::open("/dev/urandom")
+        .context("failed to open /dev/urandom for control panel token")?
+        .read_exact(&mut bytes)
+        .context("failed to read control panel token bytes")?;
+    let mut token = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        write!(&mut token, "{byte:02x}").expect("writing to a String cannot fail");
+    }
+    Ok(token)
+}
+
+fn escape_js_string(value: &str) -> String {
+    value
+        .chars()
+        .flat_map(|ch| match ch {
+            '\\' => "\\\\".chars().collect::<Vec<_>>(),
+            '"' => "\\\"".chars().collect(),
+            '\n' => "\\n".chars().collect(),
+            '\r' => "\\r".chars().collect(),
+            '<' => "\\u003c".chars().collect(),
+            '>' => "\\u003e".chars().collect(),
+            '&' => "\\u0026".chars().collect(),
+            _ => vec![ch],
+        })
+        .collect()
+}
+
+fn control_panel_html(control_token: &str, project_id: &str) -> String {
     format!(
         r##"<!doctype html>
 <html lang="en">
@@ -432,6 +556,19 @@ button:hover {{ background: var(--accent-strong); }}
   padding-top: 16px;
   border-top: 1px solid var(--line);
 }}
+.connect {{
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px solid var(--line);
+}}
+.connect-status {{
+  margin-top: 8px;
+  min-height: 34px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}}
 .meta strong {{ color: var(--text); font-weight: 650; }}
 .toolbar {{
   display: flex;
@@ -473,6 +610,10 @@ button:hover {{ background: var(--accent-strong); }}
     <label for="browserSelect">Browser</label>
     <select id="browserSelect"></select>
     <button id="selectButton" type="button">Select</button>
+    <div class="connect">
+      <button id="connectEdgeButton" type="button">Connect Edge</button>
+      <div id="connectStatus" class="connect-status">Checking Edge extension</div>
+    </div>
     <div class="share">
       <label for="shareName">Shared Link</label>
       <input id="shareName" value="edge" autocomplete="off" spellcheck="false">
@@ -493,7 +634,11 @@ button:hover {{ background: var(--accent-strong); }}
 </div>
 <script>
 const personalName = "{personal}";
+const projectId = "{project_id}";
+const controlToken = "{control_token}";
+const edgeBrowserName = "edge";
 let lastActive = "";
+let autoConnectStarted = false;
 
 async function loadInventory() {{
   const response = await fetch("/api/browsers", {{ cache: "no-store" }});
@@ -550,9 +695,71 @@ async function selectBrowser() {{
   const select = document.getElementById("browserSelect");
   const name = select.value;
   if (!name) return;
-  const response = await fetch("/api/select?name=" + encodeURIComponent(name), {{ method: "POST" }});
+  const response = await apiFetch("/api/select?name=" + encodeURIComponent(name), {{ method: "POST" }});
   if (!response.ok) throw new Error(await response.text());
   await loadInventory();
+}}
+
+async function connectEdge(auto) {{
+  if (!window.browserConnection || typeof window.browserConnection.request !== "function") {{
+    setConnectStatus("Edge extension is not available on this page.");
+    return;
+  }}
+
+  setConnectStatus(auto ? "Requesting Edge connection" : "Opening Edge connection request");
+  const result = await window.browserConnection.request({{
+    method: "connect",
+    params: {{
+      protocolVersion: 1,
+      relayUrl: window.location.origin,
+      workspaceId: projectId,
+      poolId: "current-runtime",
+      browserName: edgeBrowserName,
+      displayName: "Edge"
+    }}
+  }});
+  if (!result || !result.shareUrl) {{
+    throw new Error("Edge extension did not return a share URL");
+  }}
+  await registerShare(edgeBrowserName, result.shareUrl);
+  setConnectStatus("Edge connected to this browser pool.");
+}}
+
+async function registerShare(name, shareUrl) {{
+  const body = new URLSearchParams({{ name, share_url: shareUrl }});
+  const response = await apiFetch("/api/share", {{
+    method: "POST",
+    headers: {{ "Content-Type": "application/x-www-form-urlencoded" }},
+    body
+  }});
+  if (!response.ok) throw new Error(await response.text());
+  await loadInventory();
+}}
+
+function maybeAutoConnectEdge() {{
+  if (autoConnectStarted) return;
+  autoConnectStarted = true;
+  if (!window.browserConnection || typeof window.browserConnection.request !== "function") {{
+    setConnectStatus("Install or enable Edge Share extension to connect this Edge.");
+    return;
+  }}
+  const key = "browserConnectionAutoConnect:" + window.location.origin + window.location.pathname;
+  if (sessionStorage.getItem(key) === "1") {{
+    setConnectStatus("Edge Share extension detected.");
+    return;
+  }}
+  sessionStorage.setItem(key, "1");
+  connectEdge(true).catch(error => setConnectStatus(error.message || String(error)));
+}}
+
+function setConnectStatus(message) {{
+  document.getElementById("connectStatus").textContent = message;
+}}
+
+function apiFetch(url, options = {{}}) {{
+  const headers = new Headers(options.headers || {{}});
+  headers.set("X-Browser-Control-Token", controlToken);
+  return fetch(url, {{ ...options, headers }});
 }}
 
 document.getElementById("selectButton").addEventListener("click", () => {{
@@ -561,26 +768,27 @@ document.getElementById("selectButton").addEventListener("click", () => {{
 document.getElementById("browserSelect").addEventListener("change", () => {{
   selectBrowser().catch(error => console.error(error));
 }});
+document.getElementById("connectEdgeButton").addEventListener("click", () => {{
+  sessionStorage.removeItem("browserConnectionAutoConnect:" + window.location.origin + window.location.pathname);
+  connectEdge(false).catch(error => setConnectStatus(error.message || String(error)));
+}});
 document.getElementById("shareButton").addEventListener("click", async () => {{
   const name = document.getElementById("shareName").value.trim() || "edge";
   const shareUrl = document.getElementById("shareUrl").value.trim();
   if (!shareUrl) return;
-  const body = new URLSearchParams({{ name, share_url: shareUrl }});
-  const response = await fetch("/api/share", {{
-    method: "POST",
-    headers: {{ "Content-Type": "application/x-www-form-urlencoded" }},
-    body
-  }});
-  if (!response.ok) throw new Error(await response.text());
-  await loadInventory();
+  await registerShare(name, shareUrl);
 }});
+window.addEventListener("browserConnection#initialized", maybeAutoConnectEdge);
+setTimeout(maybeAutoConnectEdge, 300);
 loadInventory().catch(error => console.error(error));
 setInterval(() => loadInventory().catch(error => console.error(error)), 1000);
 </script>
 </body>
 </html>
 "##,
-        personal = PERSONAL_BROWSER_NAME
+        personal = PERSONAL_BROWSER_NAME,
+        project_id = escape_js_string(project_id),
+        control_token = control_token
     )
 }
 
@@ -598,5 +806,16 @@ mod tests {
             query_param("/api/select?name=work%2Dbrowser", "name").as_deref(),
             Some("work-browser")
         );
+    }
+
+    #[test]
+    fn validates_control_token_from_header() {
+        let request = parse_http_request(
+            b"POST /api/share HTTP/1.1\r\nX-Browser-Control-Token: secret\r\nContent-Length: 0\r\n\r\n",
+        )
+        .expect("request parses");
+
+        assert!(has_valid_control_token(&request, "secret"));
+        assert!(!has_valid_control_token(&request, "other"));
     }
 }

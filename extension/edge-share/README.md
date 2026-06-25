@@ -12,6 +12,23 @@ build step and no dependencies.
 4. Select this `extension/edge-share` directory.
 5. Open the extension popup, enter the relay URL, and click `Share`.
 
+## Connect from browser-connection control panel
+
+Open the `browser-connection` `controlPanelUrl` in the Edge profile where this
+extension is installed. The page injects `window.browserConnection`, triggers a
+connect request, and this extension opens a confirmation window. After approval,
+the extension connects to the control panel origin as the relay and returns a
+share link to the page, which registers it in the current browser pool.
+
+This mode does not require copying the share link or starting
+`browser-connection-relay` separately for the current workspace. If the Edge
+browser is on another machine, expose the control panel only through an
+authenticated platform proxy or private tunnel that forwards HTTP(S) and
+WebSocket upgrade to the same origin. The panel token is CSRF protection for the
+UI, not public authentication.
+
+## Manual share link
+
 The popup generates a one-time browser session and a share link such as:
 
 ```text

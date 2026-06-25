@@ -5,6 +5,8 @@ const DEFAULT_RELAY_URL = "http://127.0.0.1:8765";
 const STORAGE_KEY = "edgeShareState";
 const RECONNECT_MIN_MS = 1000;
 const RECONNECT_MAX_MS = 30000;
+const PLATFORM_CONNECT_TTL_MS = 2 * 60 * 1000;
+const PLATFORM_RELAY_CONNECT_TIMEOUT_MS = 8000;
 
 let state = {
   sharing: false,
@@ -17,6 +19,11 @@ let state = {
   status: "idle",
   lastError: "",
   activeTabId: null,
+  platformOrigin: "",
+  platformHref: "",
+  workspaceId: "",
+  poolId: "",
+  browserName: "",
   updatedAt: ""
 };
 
@@ -25,6 +32,7 @@ let reconnectTimer = null;
 let reconnectDelayMs = RECONNECT_MIN_MS;
 let intentionallyClosed = false;
 const attachedTabs = new Set();
+const pendingPlatformRequests = new Map();
 
 chrome.runtime.onInstalled.addListener(() => {
   restoreState().then(connectIfNeeded).catch(reportError);
@@ -34,8 +42,8 @@ chrome.runtime.onStartup.addListener(() => {
   restoreState().then(connectIfNeeded).catch(reportError);
 });
 
-chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
-  handlePopupMessage(message)
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  handleExtensionMessage(message, sender)
     .then((result) => sendResponse({ ok: true, result }))
     .catch((error) => sendResponse({ ok: false, error: errorMessage(error) }));
   return true;
@@ -49,7 +57,7 @@ chrome.debugger.onDetach.addListener((source) => {
 
 restoreState().then(connectIfNeeded).catch(reportError);
 
-async function handlePopupMessage(message) {
+async function handleExtensionMessage(message, sender) {
   if (!message || typeof message.type !== "string") {
     throw new Error("Invalid message");
   }
@@ -63,6 +71,22 @@ async function handlePopupMessage(message) {
     return startShare(message.relayUrl || DEFAULT_RELAY_URL);
   }
 
+  if (message.type === "platform_request") {
+    return handlePlatformRequest(message, sender);
+  }
+
+  if (message.type === "get_platform_connect_request") {
+    return getPlatformConnectRequest(message.requestId);
+  }
+
+  if (message.type === "approve_platform_connect") {
+    return approvePlatformConnect(message.requestId);
+  }
+
+  if (message.type === "reject_platform_connect") {
+    return rejectPlatformConnect(message.requestId);
+  }
+
   if (message.type === "stop_share") {
     return stopShare();
   }
@@ -70,7 +94,7 @@ async function handlePopupMessage(message) {
   throw new Error(`Unknown popup message: ${message.type}`);
 }
 
-async function startShare(relayUrlInput) {
+async function startShare(relayUrlInput, options = {}) {
   const relayUrl = normalizeRelayUrl(relayUrlInput);
   const sessionId = randomHex(12);
   const browserToken = randomHex(24);
@@ -90,7 +114,12 @@ async function startShare(relayUrlInput) {
     shareUrl,
     status: "connecting",
     lastError: "",
-    activeTabId: null
+    activeTabId: null,
+    platformOrigin: options.platformOrigin || "",
+    platformHref: options.platformHref || "",
+    workspaceId: options.workspaceId || "",
+    poolId: options.poolId || "",
+    browserName: options.browserName || ""
   });
 
   connectRelay();
@@ -120,7 +149,12 @@ async function stopShare() {
     agentToken: "",
     shareUrl: "",
     status: "stopped",
-    lastError: ""
+    lastError: "",
+    platformOrigin: "",
+    platformHref: "",
+    workspaceId: "",
+    poolId: "",
+    browserName: ""
   });
 
   return publicState();
@@ -157,6 +191,10 @@ function publicState() {
     status: state.status,
     lastError: state.lastError,
     activeTabId: state.activeTabId,
+    platformOrigin: state.platformOrigin,
+    workspaceId: state.workspaceId,
+    poolId: state.poolId,
+    browserName: state.browserName,
     updatedAt: state.updatedAt
   };
 }
@@ -257,6 +295,172 @@ function clearReconnectTimer() {
     clearTimeout(reconnectTimer);
     reconnectTimer = null;
   }
+}
+
+async function handlePlatformRequest(message, sender) {
+  if (message.method !== "connect") {
+    throw new Error(`Unsupported platform request method: ${message.method}`);
+  }
+  if (!sender || !sender.tab || !Number.isInteger(sender.tab.id) || !sender.url) {
+    throw new Error("Platform requests must come from a browser tab");
+  }
+
+  const pageUrl = new URL(sender.url);
+  if (pageUrl.protocol !== "http:" && pageUrl.protocol !== "https:") {
+    throw new Error("Platform requests must come from an http or https page");
+  }
+  if (message.origin !== pageUrl.origin) {
+    throw new Error("Platform request origin did not match the sender tab");
+  }
+
+  const params = message.params && typeof message.params === "object" ? message.params : {};
+  const requestId = randomHex(12);
+  const request = {
+    requestId,
+    origin: pageUrl.origin,
+    href: sender.url,
+    title: message.title || sender.tab.title || "",
+    tabId: sender.tab.id,
+    workspaceId: stringParam(params.workspaceId),
+    poolId: stringParam(params.poolId),
+    browserName: stringParam(params.displayName || params.browserName) || "Edge",
+    relayUrl: normalizeRelayUrl(stringParam(params.relayUrl) || pageUrl.origin),
+    createdAt: Date.now()
+  };
+
+  if (new URL(request.relayUrl).origin !== request.origin) {
+    throw new Error("Platform relayUrl must use the requesting page origin");
+  }
+
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      pendingPlatformRequests.delete(requestId);
+      reject(new Error("Platform connect request expired"));
+    }, PLATFORM_CONNECT_TTL_MS);
+
+    pendingPlatformRequests.set(requestId, {
+      request,
+      resolve,
+      reject,
+      timeout
+    });
+
+    chrome.windows.create(
+      {
+        url: chrome.runtime.getURL(`connect.html?requestId=${encodeURIComponent(requestId)}`),
+        type: "popup",
+        width: 420,
+        height: 560
+      },
+      () => {
+        const error = chrome.runtime.lastError;
+        if (error) {
+          clearTimeout(timeout);
+          pendingPlatformRequests.delete(requestId);
+          reject(new Error(error.message));
+        }
+      }
+    );
+  });
+}
+
+async function getPlatformConnectRequest(requestId) {
+  const entry = pendingPlatformRequests.get(String(requestId || ""));
+  if (!entry) {
+    throw new Error("Platform connect request was not found or expired");
+  }
+  return sanitizePlatformRequest(entry.request);
+}
+
+async function approvePlatformConnect(requestId) {
+  const id = String(requestId || "");
+  const entry = pendingPlatformRequests.get(id);
+  if (!entry) {
+    throw new Error("Platform connect request was not found or expired");
+  }
+
+  pendingPlatformRequests.delete(id);
+  clearTimeout(entry.timeout);
+
+  let started = false;
+  try {
+    await startShare(entry.request.relayUrl, {
+      platformOrigin: entry.request.origin,
+      platformHref: entry.request.href,
+      workspaceId: entry.request.workspaceId,
+      poolId: entry.request.poolId,
+      browserName: entry.request.browserName
+    });
+    started = true;
+    if (!(await waitForRelayConnection(PLATFORM_RELAY_CONNECT_TIMEOUT_MS))) {
+      throw new Error(state.lastError || "Timed out connecting to browser relay");
+    }
+    const result = publicState();
+    const response = {
+      shareUrl: result.shareUrl,
+      sessionId: result.sessionId,
+      connected: result.connected,
+      relayUrl: result.relayUrl,
+      platformOrigin: entry.request.origin,
+      workspaceId: entry.request.workspaceId,
+      poolId: entry.request.poolId,
+      browserName: entry.request.browserName
+    };
+    entry.resolve(response);
+    return response;
+  } catch (error) {
+    if (started) {
+      await stopShare().catch(reportError);
+    }
+    entry.reject(error);
+    throw error;
+  }
+}
+
+async function rejectPlatformConnect(requestId) {
+  const id = String(requestId || "");
+  const entry = pendingPlatformRequests.get(id);
+  if (!entry) {
+    return { rejected: true };
+  }
+
+  pendingPlatformRequests.delete(id);
+  clearTimeout(entry.timeout);
+  const error = new Error("User rejected browser connection");
+  entry.reject(error);
+  return { rejected: true };
+}
+
+function sanitizePlatformRequest(request) {
+  return {
+    requestId: request.requestId,
+    origin: request.origin,
+    href: request.href,
+    title: request.title,
+    workspaceId: request.workspaceId,
+    poolId: request.poolId,
+    browserName: request.browserName,
+    relayUrl: request.relayUrl,
+    createdAt: request.createdAt
+  };
+}
+
+async function waitForRelayConnection(timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (state.connected) {
+      return true;
+    }
+    if (!state.sharing) {
+      return false;
+    }
+    await sleep(100);
+  }
+  return state.connected;
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 async function handleRelayMessage(rawData) {
@@ -834,6 +1038,13 @@ function normalizeRelayUrl(input) {
   url.hash = "";
   url.pathname = url.pathname.replace(/\/+$/, "");
   return url.href.replace(/\/$/, "");
+}
+
+function stringParam(value) {
+  if (typeof value !== "string") {
+    return "";
+  }
+  return value.trim().slice(0, 512);
 }
 
 function randomHex(lengthBytes) {

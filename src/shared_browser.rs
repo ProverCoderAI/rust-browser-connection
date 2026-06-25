@@ -124,15 +124,15 @@ pub fn run_relay(config: RelayConfig) -> Result<()> {
 }
 
 pub fn serve_listener(listener: TcpListener) -> Result<()> {
-    let state: SharedRelayState = Arc::new(RelayState::default());
+    let relay = BrowserShareRelay::new();
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => {
-                let state = Arc::clone(&state);
+                let relay = relay.clone();
                 thread::Builder::new()
                     .name("browser-share-relay-client".to_string())
                     .spawn(move || {
-                        let _ = handle_client(state, stream);
+                        let _ = relay.handle_stream(stream);
                     })
                     .context("failed to spawn relay client thread")?;
             }
@@ -140,6 +140,29 @@ pub fn serve_listener(listener: TcpListener) -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[derive(Debug, Clone)]
+pub struct BrowserShareRelay {
+    state: SharedRelayState,
+}
+
+impl BrowserShareRelay {
+    pub fn new() -> Self {
+        Self {
+            state: Arc::new(RelayState::default()),
+        }
+    }
+
+    pub fn handle_stream(&self, stream: TcpStream) -> Result<()> {
+        handle_client(Arc::clone(&self.state), stream)
+    }
+}
+
+impl Default for BrowserShareRelay {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -368,7 +391,10 @@ impl RelayState {
         connection_id: u64,
         raw_message: &str,
     ) -> Result<()> {
-        let message = validate_relay_json_message(raw_message)?;
+        let message = match validate_relay_json_message(from, raw_message)? {
+            Some(message) => message,
+            None => return Ok(()),
+        };
         let sessions = self
             .sessions
             .lock()
@@ -558,20 +584,25 @@ fn parse_share_path(path: &str) -> Result<String> {
     }
 }
 
-fn validate_relay_json_message(raw_message: &str) -> Result<String> {
+fn validate_relay_json_message(from: PeerRole, raw_message: &str) -> Result<Option<String>> {
     if raw_message.len() > MAX_JSON_MESSAGE_BYTES {
         return Err(anyhow!("relay JSON message exceeded size limit"));
     }
     let value: Value = serde_json::from_str(raw_message).context("relay message was not JSON")?;
-    let id = value
-        .get("id")
-        .ok_or_else(|| anyhow!("relay JSON message must include request id"))?;
+    let Some(id) = value.get("id") else {
+        if from == PeerRole::Browser {
+            return Ok(None);
+        }
+        return Err(anyhow!("relay JSON message must include request id"));
+    };
     if id.is_null() || id.is_array() || id.is_object() {
         return Err(anyhow!(
             "relay JSON message id must be a string, number, or boolean"
         ));
     }
-    serde_json::to_string(&value).context("failed to encode relay JSON message")
+    serde_json::to_string(&value)
+        .map(Some)
+        .context("failed to encode relay JSON message")
 }
 
 fn validate_session_id(value: &str) -> Result<String> {
@@ -717,9 +748,17 @@ mod tests {
 
     #[test]
     fn rejects_messages_without_request_id() {
-        let error = validate_relay_json_message(r#"{"method":"ping"}"#).unwrap_err();
+        let error =
+            validate_relay_json_message(PeerRole::Agent, r#"{"method":"ping"}"#).unwrap_err();
 
         assert!(error.to_string().contains("request id"));
+    }
+
+    #[test]
+    fn ignores_browser_events_without_request_id() {
+        let result = validate_relay_json_message(PeerRole::Browser, r#"{"type":"hello"}"#).unwrap();
+
+        assert_eq!(result, None);
     }
 
     #[test]

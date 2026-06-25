@@ -92,6 +92,19 @@ the user clicks `Stop` in the extension or the relay session is removed. Extensi
 common browser tools such as navigate, snapshot, evaluate, click, type, key press, and screenshot,
 but it is not full CDP/VNC parity and protected Edge pages may reject actions.
 
+### Connect Edge from the noVNC control panel
+
+The control panel can also act as the connection page. Install the Edge share extension, then open
+the `controlPanelUrl` in that Edge. The page detects `window.browserConnection`, opens the
+extension approval window, and registers the returned `shareUrl` into the current
+`browser-connection` runtime through `/api/share`.
+
+This mode uses the control panel origin as the relay URL, so a separate
+`browser-connection-relay` process is not required for the current workspace. If Edge runs on
+another machine, expose the control panel only through an authenticated platform proxy or private
+tunnel that forwards HTTP and WebSocket upgrade to the same origin; the panel token is CSRF
+protection for the UI, not public authentication.
+
 ## Personal browser
 
 You can attach an already running desktop Chrome/Chromium browser if it exposes a CDP port.

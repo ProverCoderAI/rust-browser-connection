@@ -12,5 +12,6 @@ edge://extensions
 Enable `Developer mode`, choose `Load unpacked`, and select the extracted
 `edge-share` folder.
 
-The extension connects to `browser-connection-relay` and produces share links
-that can be pasted into the `browser-connection` control panel.
+Open the `browser-connection` control panel in Edge to approve an automatic
+connection into the current browser pool. The popup/manual mode is still
+available for hosted `browser-connection-relay` share links.
