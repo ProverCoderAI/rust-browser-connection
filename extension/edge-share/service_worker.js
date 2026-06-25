@@ -5,6 +5,7 @@ const DEFAULT_RELAY_URL = "http://127.0.0.1:8765";
 const STORAGE_KEY = "edgeShareState";
 const RECONNECT_MIN_MS = 1000;
 const RECONNECT_MAX_MS = 30000;
+const RELAY_KEEPALIVE_MS = 20 * 1000;
 const PLATFORM_CONNECT_TTL_MS = 2 * 60 * 1000;
 const PLATFORM_RELAY_CONNECT_TIMEOUT_MS = 8000;
 
@@ -29,6 +30,7 @@ let state = {
 
 let socket = null;
 let reconnectTimer = null;
+let keepAliveTimer = null;
 let reconnectDelayMs = RECONNECT_MIN_MS;
 let intentionallyClosed = false;
 const attachedTabs = new Set();
@@ -129,6 +131,7 @@ async function startShare(relayUrlInput, options = {}) {
 async function stopShare() {
   intentionallyClosed = true;
   clearReconnectTimer();
+  clearKeepAliveTimer();
 
   if (socket) {
     try {
@@ -222,6 +225,7 @@ function connectRelay() {
   }
 
   clearReconnectTimer();
+  clearKeepAliveTimer();
 
   if (socket) {
     try {
@@ -251,6 +255,7 @@ function connectRelay() {
       sessionId: state.sessionId,
       userAgent: navigator.userAgent
     });
+    startKeepAliveTimer();
   });
 
   socket.addEventListener("message", (event) => {
@@ -264,6 +269,7 @@ function connectRelay() {
   });
 
   socket.addEventListener("close", (event) => {
+    clearKeepAliveTimer();
     socket = null;
     persistState({
       connected: false,
@@ -277,6 +283,7 @@ function connectRelay() {
   });
 
   socket.addEventListener("error", () => {
+    clearKeepAliveTimer();
     persistState({ lastError: "WebSocket error" }).catch(reportError);
   });
 }
@@ -294,6 +301,23 @@ function clearReconnectTimer() {
   if (reconnectTimer) {
     clearTimeout(reconnectTimer);
     reconnectTimer = null;
+  }
+}
+
+function startKeepAliveTimer() {
+  clearKeepAliveTimer();
+  keepAliveTimer = setInterval(() => {
+    sendSocket({
+      type: "keepalive",
+      at: new Date().toISOString()
+    });
+  }, RELAY_KEEPALIVE_MS);
+}
+
+function clearKeepAliveTimer() {
+  if (keepAliveTimer) {
+    clearInterval(keepAliveTimer);
+    keepAliveTimer = null;
   }
 }
 
