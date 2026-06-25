@@ -181,7 +181,7 @@ fn mcp_navigates_shared_browser_through_relay_link() {
 }
 
 #[test]
-fn browserctl_navigates_shared_browser_through_relay_link_without_mcp() {
+fn rbc_navigates_shared_browser_through_relay_link_without_mcp() {
     let relay_port = unused_local_port();
     let relay_bind = format!("127.0.0.1:{relay_port}");
     let relay = Command::new(env!("CARGO_BIN_EXE_browser-connection-relay"))
@@ -192,7 +192,7 @@ fn browserctl_navigates_shared_browser_through_relay_link_without_mcp() {
         .spawn()
         .expect("spawn browser-connection-relay");
 
-    let session = "browserctl-session-test";
+    let session = "rbc-session-test";
     let agent_token = "agent-token";
     let browser_url = format!(
         "ws://127.0.0.1:{relay_port}/ws/browser/{session}?token=browser-token&agent_token={agent_token}"
@@ -226,15 +226,16 @@ fn browserctl_navigates_shared_browser_through_relay_link_without_mcp() {
         .expect("browser websocket connects to relay");
 
     let share_url = format!("http://127.0.0.1:{relay_port}/share/{session}#agent={agent_token}");
-    let output = Command::new(env!("CARGO_BIN_EXE_browserctl"))
+    let output = Command::new(env!("CARGO_BIN_EXE_rbc"))
         .args([
             "--share-url",
             &share_url,
+            "dg-shared-browser-test",
             "navigate",
             "https://example.com/",
         ])
         .output()
-        .expect("run browserctl");
+        .expect("run rbc");
 
     stop_child(relay);
     browser_thread.join().expect("browser thread exits");

@@ -1,4 +1,4 @@
 interface:
   display_name: "Browser CLI"
-  short_description: "Automate browsers with browserctl commands"
-  default_prompt: "Use $browser-cli to inspect the current browser page and automate it with browserctl."
+  short_description: "Automate browsers with rbc commands"
+  default_prompt: "Use $browser-cli to inspect the current browser page and automate it with rbc."

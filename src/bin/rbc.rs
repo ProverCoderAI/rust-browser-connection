@@ -5,7 +5,6 @@ use clap::{Parser, Subcommand};
 use docker_git_browser_connection::browser_actions::{
     command_result_json, dispatch_browser_command, BrowserCommand, BrowserTarget,
 };
-use docker_git_browser_connection::mcp::project_id_from_env_or_default;
 use docker_git_browser_connection::{
     compute_browser_control_panel_port, compute_browser_ports, render_cdp_url_for_ports,
 };
@@ -18,9 +17,9 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Parser)]
 #[command(
-    name = "browserctl",
+    name = "rbc",
     version,
-    about = "CLI browser automation for browser-connection without MCP"
+    about = "Rust browser-connection CLI automation without MCP"
 )]
 struct Cli {
     /// Shared browser extension URL from Edge Share.
@@ -31,11 +30,7 @@ struct Cli {
     #[arg(long, global = true, conflicts_with = "share_url")]
     cdp_url: Option<String>,
 
-    /// docker-git/browser-connection project id for control-panel discovery.
-    #[arg(long, global = true)]
-    project: Option<String>,
-
-    /// Control panel port. Defaults to the deterministic port for --project.
+    /// Control panel port. Defaults to the deterministic port for PROJECT.
     #[arg(long, global = true)]
     control_port: Option<u16>,
 
@@ -47,12 +42,56 @@ struct Cli {
     #[arg(long, global = true, value_name = "DIR")]
     trace_dir: Option<PathBuf>,
 
+    /// docker-git/browser-connection project id for control-panel discovery.
+    project: String,
+
     #[command(subcommand)]
-    command: Commands,
+    command: TopCommand,
 }
 
 #[derive(Debug, Subcommand)]
-enum Commands {
+enum TopCommand {
+    /// Optional explicit namespace for tool commands: rbc PROJECT tools snapshot.
+    Tools {
+        #[command(subcommand)]
+        command: ToolCommand,
+    },
+    /// Navigate the current page to a URL.
+    Navigate { url: String },
+    /// Return page title, URL, visible text, and simple selectors.
+    Snapshot,
+    /// Evaluate JavaScript in the current page.
+    Eval {
+        /// JavaScript expression to evaluate.
+        #[arg(long, conflicts_with = "file")]
+        expression: Option<String>,
+        /// Read JavaScript expression from a file.
+        #[arg(long, value_name = "PATH")]
+        file: Option<PathBuf>,
+    },
+    /// Click an element by CSS selector.
+    Click { selector: String },
+    /// Set text in an input-like element.
+    Type { selector: String, text: String },
+    /// Press a keyboard key.
+    Key { key: String },
+    /// Capture a PNG screenshot.
+    Screenshot {
+        /// Capture beyond the viewport.
+        #[arg(long)]
+        full_page: bool,
+        /// Decode the screenshot and write PNG bytes to this path.
+        #[arg(long, value_name = "PNG")]
+        output: Option<PathBuf>,
+    },
+    /// List tabs/windows for a shared-extension browser.
+    Tabs,
+    /// Activate a tab by browser tab id.
+    ActivateTab { tab_id: i64 },
+}
+
+#[derive(Debug, Clone, Subcommand)]
+enum ToolCommand {
     /// Navigate the current page to a URL.
     Navigate { url: String },
     /// Return page title, URL, visible text, and simple selectors.
@@ -98,7 +137,8 @@ fn main() {
 fn run() -> Result<()> {
     let cli = Cli::parse();
     let target = resolve_target(&cli)?;
-    let command = browser_command(&cli.command)?;
+    let tool = tool_command(&cli.command);
+    let command = browser_command(&tool)?;
     let started = Instant::now();
     let result = dispatch_browser_command(&target, &command);
     let duration_ms = started.elapsed().as_millis() as u64;
@@ -138,16 +178,19 @@ fn resolve_target(cli: &Cli) -> Result<BrowserTarget> {
         return Ok(BrowserTarget::cdp(url));
     }
 
-    let project = project_id_from_env_or_default(cli.project.clone());
+    let project = cli.project.trim();
+    if project.is_empty() {
+        return Err(anyhow!("PROJECT must not be empty"));
+    }
     let port = cli
         .control_port
-        .unwrap_or_else(|| compute_browser_control_panel_port(&project));
+        .unwrap_or_else(|| compute_browser_control_panel_port(project));
     match load_control_panel_inventory(port) {
         Ok(inventory) => target_from_inventory(&inventory).with_context(|| {
             format!("control panel on port {port} did not expose an active browser")
         }),
         Err(_) => Ok(BrowserTarget::cdp(render_cdp_url_for_ports(
-            compute_browser_ports(&project),
+            compute_browser_ports(project),
         ))),
     }
 }
@@ -204,11 +247,37 @@ fn target_from_inventory(inventory: &Value) -> Result<BrowserTarget> {
     ))
 }
 
-fn browser_command(command: &Commands) -> Result<BrowserCommand> {
+fn tool_command(command: &TopCommand) -> ToolCommand {
     match command {
-        Commands::Navigate { url } => Ok(BrowserCommand::Navigate { url: url.clone() }),
-        Commands::Snapshot => Ok(BrowserCommand::Snapshot),
-        Commands::Eval { expression, file } => {
+        TopCommand::Tools { command } => command.clone(),
+        TopCommand::Navigate { url } => ToolCommand::Navigate { url: url.clone() },
+        TopCommand::Snapshot => ToolCommand::Snapshot,
+        TopCommand::Eval { expression, file } => ToolCommand::Eval {
+            expression: expression.clone(),
+            file: file.clone(),
+        },
+        TopCommand::Click { selector } => ToolCommand::Click {
+            selector: selector.clone(),
+        },
+        TopCommand::Type { selector, text } => ToolCommand::Type {
+            selector: selector.clone(),
+            text: text.clone(),
+        },
+        TopCommand::Key { key } => ToolCommand::Key { key: key.clone() },
+        TopCommand::Screenshot { full_page, output } => ToolCommand::Screenshot {
+            full_page: *full_page,
+            output: output.clone(),
+        },
+        TopCommand::Tabs => ToolCommand::Tabs,
+        TopCommand::ActivateTab { tab_id } => ToolCommand::ActivateTab { tab_id: *tab_id },
+    }
+}
+
+fn browser_command(command: &ToolCommand) -> Result<BrowserCommand> {
+    match command {
+        ToolCommand::Navigate { url } => Ok(BrowserCommand::Navigate { url: url.clone() }),
+        ToolCommand::Snapshot => Ok(BrowserCommand::Snapshot),
+        ToolCommand::Eval { expression, file } => {
             let expression = match (expression, file) {
                 (Some(expression), None) => expression.clone(),
                 (None, Some(path)) => fs::read_to_string(path)
@@ -220,29 +289,29 @@ fn browser_command(command: &Commands) -> Result<BrowserCommand> {
             };
             Ok(BrowserCommand::Evaluate { expression })
         }
-        Commands::Click { selector } => Ok(BrowserCommand::Click {
+        ToolCommand::Click { selector } => Ok(BrowserCommand::Click {
             selector: selector.clone(),
         }),
-        Commands::Type { selector, text } => Ok(BrowserCommand::TypeText {
+        ToolCommand::Type { selector, text } => Ok(BrowserCommand::TypeText {
             selector: selector.clone(),
             text: text.clone(),
         }),
-        Commands::Key { key } => Ok(BrowserCommand::PressKey { key: key.clone() }),
-        Commands::Screenshot { full_page, .. } => Ok(BrowserCommand::Screenshot {
+        ToolCommand::Key { key } => Ok(BrowserCommand::PressKey { key: key.clone() }),
+        ToolCommand::Screenshot { full_page, .. } => Ok(BrowserCommand::Screenshot {
             full_page: *full_page,
         }),
-        Commands::Tabs => Ok(BrowserCommand::ListTabs),
-        Commands::ActivateTab { tab_id } => Ok(BrowserCommand::ActivateTab { tab_id: *tab_id }),
+        ToolCommand::Tabs => Ok(BrowserCommand::ListTabs),
+        ToolCommand::ActivateTab { tab_id } => Ok(BrowserCommand::ActivateTab { tab_id: *tab_id }),
     }
 }
 
 fn command_output(command: &BrowserCommand, text: &str, cli: &Cli) -> Result<CommandOutput> {
     if let BrowserCommand::Screenshot { .. } = command {
-        if let Commands::Screenshot {
+        if let ToolCommand::Screenshot {
             output: Some(path), ..
-        } = &cli.command
+        } = tool_command(&cli.command)
         {
-            let written = write_screenshot(text, path)?;
+            let written = write_screenshot(text, &path)?;
             let result = json!({
                 "path": path,
                 "mimeType": written.mime_type,
@@ -300,7 +369,7 @@ fn write_trace(
         return Ok(());
     };
     fs::create_dir_all(dir).with_context(|| format!("failed to create {}", dir.display()))?;
-    let path = dir.join("browserctl.jsonl");
+    let path = dir.join("rbc.jsonl");
     let mut file = OpenOptions::new()
         .create(true)
         .append(true)
@@ -435,9 +504,9 @@ mod tests {
 
     #[test]
     fn eval_command_reads_expression_from_file() {
-        let path = std::env::temp_dir().join(format!("browserctl-eval-{}.js", unix_ms()));
+        let path = std::env::temp_dir().join(format!("rbc-eval-{}.js", unix_ms()));
         fs::write(&path, "document.title").unwrap();
-        let command = browser_command(&Commands::Eval {
+        let command = browser_command(&ToolCommand::Eval {
             expression: None,
             file: Some(path.clone()),
         })
@@ -453,7 +522,7 @@ mod tests {
 
     #[test]
     fn writes_screenshot_png_from_data_url() {
-        let path = std::env::temp_dir().join(format!("browserctl-shot-{}.png", unix_ms()));
+        let path = std::env::temp_dir().join(format!("rbc-shot-{}.png", unix_ms()));
         let written = write_screenshot("data:image/png;base64,TQ==", &path).unwrap();
         assert_eq!(written.mime_type, "image/png");
         assert_eq!(written.bytes, 1);

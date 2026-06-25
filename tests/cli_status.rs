@@ -45,11 +45,11 @@ fn root_help_exposes_stop_command_without_docker() {
 }
 
 #[test]
-fn browserctl_help_exposes_browser_actions_without_mcp() {
-    let output = Command::new(env!("CARGO_BIN_EXE_browserctl"))
+fn rbc_help_exposes_browser_actions_without_mcp() {
+    let output = Command::new(env!("CARGO_BIN_EXE_rbc"))
         .args(["--help"])
         .output()
-        .expect("Failed to execute browserctl");
+        .expect("Failed to execute rbc");
 
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -57,16 +57,30 @@ fn browserctl_help_exposes_browser_actions_without_mcp() {
     assert!(stdout.contains("navigate"));
     assert!(stdout.contains("--share-url"));
     assert!(stdout.contains("--cdp-url"));
+    assert!(!stdout.contains("--project"));
 }
 
 #[test]
-fn browserctl_eval_requires_expression_or_file_before_network() {
-    let output = Command::new(env!("CARGO_BIN_EXE_browserctl"))
-        .args(["--cdp-url", "http://127.0.0.1:1", "eval"])
+fn rbc_eval_requires_expression_or_file_before_network() {
+    let output = Command::new(env!("CARGO_BIN_EXE_rbc"))
+        .args(["--cdp-url", "http://127.0.0.1:1", "dg-test", "eval"])
         .output()
-        .expect("Failed to execute browserctl");
+        .expect("Failed to execute rbc");
 
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("eval requires --expression or --file"));
+}
+
+#[test]
+fn rbc_supports_tools_namespace_for_project_commands() {
+    let output = Command::new(env!("CARGO_BIN_EXE_rbc"))
+        .args(["dg-test", "tools", "--help"])
+        .output()
+        .expect("Failed to execute rbc");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("snapshot"));
+    assert!(stdout.contains("activate-tab"));
 }
