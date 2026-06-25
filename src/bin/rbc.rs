@@ -93,7 +93,7 @@ enum TopCommand {
     Tabs,
     /// Activate a tab by browser tab id.
     ActivateTab { tab_id: i64 },
-    /// Run Playwright JavaScript against a CDP-backed browser.
+    /// Run Playwright JavaScript against a browser target.
     Pw {
         /// JavaScript file body to run with playwright/browser/context/page in scope.
         #[arg(value_name = "SCRIPT", conflicts_with = "code")]
@@ -193,7 +193,7 @@ fn run_tool_cli(cli: &Cli) -> Result<()> {
 
 fn run_playwright_cli(cli: &Cli) -> Result<()> {
     let (script, allow_close) = playwright_input(&cli.command)?;
-    let target = BrowserTarget::cdp(resolve_cdp_endpoint(cli)?);
+    let target = resolve_target(cli)?;
     let started = Instant::now();
     let result = playwright::run_playwright_script(&target, &script, allow_close);
     let duration_ms = started.elapsed().as_millis() as u64;
@@ -250,31 +250,6 @@ fn resolve_target(cli: &Cli) -> Result<BrowserTarget> {
     }
 }
 
-fn resolve_cdp_endpoint(cli: &Cli) -> Result<String> {
-    if let Some(url) = cli.cdp_url.as_ref() {
-        return Ok(url.clone());
-    }
-    if cli.share_url.is_some() {
-        return Err(anyhow!(
-            "real Playwright requires a CDP endpoint; use rbc eval/click/type for extension-only shared browsers or pass --cdp-url"
-        ));
-    }
-
-    let project = cli.project.trim();
-    if project.is_empty() {
-        return Err(anyhow!("PROJECT must not be empty"));
-    }
-    let port = cli
-        .control_port
-        .unwrap_or_else(|| compute_browser_control_panel_port(project));
-    match load_control_panel_inventory(port) {
-        Ok(inventory) => cdp_endpoint_from_inventory(&inventory).with_context(|| {
-            format!("control panel on port {port} did not expose an active CDP browser")
-        }),
-        Err(_) => Ok(render_cdp_url_for_ports(compute_browser_ports(project))),
-    }
-}
-
 fn load_control_panel_inventory(port: u16) -> Result<Value> {
     let url = format!("http://127.0.0.1:{port}/api/browsers");
     let output = Command::new("curl")
@@ -325,44 +300,6 @@ fn target_from_inventory(inventory: &Value) -> Result<BrowserTarget> {
     Err(anyhow!(
         "active browser `{active}` has neither shareUrl nor cdpEndpoint"
     ))
-}
-
-fn cdp_endpoint_from_inventory(inventory: &Value) -> Result<String> {
-    let browser = active_browser_from_inventory(inventory)?;
-    if let Some(endpoint) = browser
-        .get("cdpEndpoint")
-        .and_then(Value::as_str)
-        .filter(|url| !url.trim().is_empty())
-    {
-        return Ok(endpoint.to_string());
-    }
-    let active = browser
-        .get("name")
-        .and_then(Value::as_str)
-        .unwrap_or("active browser");
-    Err(anyhow!(
-        "`{active}` is not CDP-backed; real Playwright requires CDP. Use rbc eval/click/type or expose remote debugging and pass --cdp-url"
-    ))
-}
-
-fn active_browser_from_inventory(inventory: &Value) -> Result<&Value> {
-    let active = inventory
-        .get("active")
-        .and_then(Value::as_str)
-        .ok_or_else(|| anyhow!("inventory did not include active browser"))?;
-    let browsers = inventory
-        .get("browsers")
-        .and_then(Value::as_array)
-        .ok_or_else(|| anyhow!("inventory did not include browsers"))?;
-    browsers
-        .iter()
-        .find(|browser| browser.get("active").and_then(Value::as_bool) == Some(true))
-        .or_else(|| {
-            browsers
-                .iter()
-                .find(|browser| browser.get("name").and_then(Value::as_str) == Some(active))
-        })
-        .ok_or_else(|| anyhow!("active browser `{active}` was not found in inventory"))
 }
 
 fn tool_command(command: &TopCommand) -> ToolCommand {
@@ -778,22 +715,5 @@ mod tests {
         });
         let target = target_from_inventory(&inventory).unwrap();
         assert!(matches!(target, BrowserTarget::Shared { .. }));
-    }
-
-    #[test]
-    fn playwright_resolution_prefers_cdp_from_inventory() {
-        let inventory = json!({
-            "active": "edge",
-            "browsers": [{
-                "name": "edge",
-                "active": true,
-                "shareUrl": "https://relay.example/share/s#agent=a",
-                "cdpEndpoint": "http://127.0.0.1:9222"
-            }]
-        });
-        assert_eq!(
-            cdp_endpoint_from_inventory(&inventory).unwrap(),
-            "http://127.0.0.1:9222"
-        );
     }
 }

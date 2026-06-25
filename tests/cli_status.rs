@@ -99,25 +99,6 @@ fn rbc_pw_requires_script_or_code_before_network() {
 }
 
 #[test]
-fn rbc_pw_rejects_share_url_without_cdp() {
-    let output = Command::new(env!("CARGO_BIN_EXE_rbc"))
-        .args([
-            "--share-url",
-            "https://relay.example/share/browser#agent=token",
-            "dg-test",
-            "pw",
-            "--code",
-            "return 1;",
-        ])
-        .output()
-        .expect("Failed to execute rbc");
-
-    assert!(!output.status.success());
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("real Playwright requires a CDP endpoint"));
-}
-
-#[test]
 fn rbc_pw_runs_code_with_fake_playwright_core() {
     let temp = tempfile::tempdir().expect("tempdir is created");
     let module_dir = temp.path().join("node_modules/playwright-core");

@@ -213,6 +213,10 @@ impl SharedBrowserClient {
         self.call_text("activate_tab", json!({ "tabId": tab_id }))
     }
 
+    pub fn call_command(&self, command: &str, params: Value) -> Result<Value> {
+        self.call(command, params)
+    }
+
     fn call_text(&self, command: &str, params: Value) -> Result<String> {
         let result = self.call(command, params)?;
         if let Some(text) = result.as_str() {

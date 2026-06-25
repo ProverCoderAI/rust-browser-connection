@@ -63,7 +63,8 @@ rbc "$DOCKER_GIT_PROJECT_ID" --json --trace-dir .browser-trace eval --file /tmp/
 
 ## Playwright Pattern
 
-Use `pw` when the target has CDP and Playwright locators/actions are more ergonomic:
+Use `pw` when Playwright-style page APIs are more ergonomic. CDP-backed targets run real
+Playwright; shared-extension targets run the supported compatibility subset.
 
 ```js
 await page.goto('https://example.com');
@@ -77,12 +78,12 @@ Run it:
 rbc "$DOCKER_GIT_PROJECT_ID" --json --trace-dir .browser-trace pw /tmp/playwright-task.js
 ```
 
-`pw` exposes `playwright`, `browser`, `context`, `page`, and `pages` in scope. It requires a CDP-backed Chromium/Edge target. Extension-only share links cannot run arbitrary Playwright; use `eval`, `click`, `type`, `screenshot`, `tabs`, and `activate-tab` there.
+`pw` exposes `playwright`, `browser`, `context`, `page`, and `pages` in scope. On shared-extension targets, use the supported subset: `page.goto`, `title`, `url`, `evaluate`, `click`, `fill`, `type`, `press`, `screenshot`, `content`, `locator`, `getByText`, `getByRole`, `waitForSelector`, `waitForTimeout`, and `waitForLoadState`. Unsupported Playwright APIs fail with a clear error.
 
 ## Rules
 
 - Do not expose full shared browser URLs in logs or final answers; they contain bearer tokens.
 - Do not use `tabs` or `activate-tab` against direct CDP targets; those are shared-extension only.
-- Do not use `pw` against extension-only share links unless a CDP URL is also available.
+- Expect `pw` on shared-extension targets to be a compatibility subset, not full Playwright.
 - If a command fails because no control panel is running, retry with explicit `--share-url` or `--cdp-url`.
 - Keep command output compact; use screenshots only when visual state matters.

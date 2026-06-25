@@ -216,9 +216,12 @@ Add `--json` for machine-readable output and `--trace-dir .browser-trace` to app
 `rbc.jsonl` audit events. `rbc dg-my-project tools snapshot` is also accepted when a caller wants an
 explicit `tools` namespace.
 
-`rbc pw` runs real Playwright code through `chromium.connectOverCDP`, so it requires a CDP-backed
-Chromium/Edge target. Extension-only share links do not expose CDP; use `rbc eval/click/type` for
-those, or expose a remote-debugging endpoint and pass `--cdp-url`.
+`rbc pw` uses real Playwright through `chromium.connectOverCDP` for CDP-backed Chromium/Edge
+targets. For Edge extension share links it runs a Playwright-compatible subset over the relay. The
+shared-extension subset supports common page operations such as `goto`, `title`, `url`, `evaluate`,
+`click`, `fill`, `type`, `press`, `screenshot`, `locator`, `getByText`, `getByRole`,
+`waitForSelector`, `waitForTimeout`, and `waitForLoadState`. Unsupported Playwright APIs fail with
+a clear error that lists the available subset.
 
 ```js
 // /tmp/playwright-task.js
