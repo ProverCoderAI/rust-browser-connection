@@ -551,7 +551,8 @@ button:hover {{ background: var(--accent-strong); }}
 .row {{ border-top: 1px solid var(--line); padding: 8px 0; color: var(--muted); overflow-wrap: anywhere; white-space: pre-wrap; }}
 .row:first-child {{ border-top: 0; padding-top: 0; }}
 .window-group {{ border: 1px solid var(--line); border-radius: 6px; margin: 10px 0; overflow: hidden; background: color-mix(in srgb, var(--panel) 88%, var(--line)); }}
-.window-head {{ display: flex; justify-content: space-between; gap: 10px; padding: 10px; border-bottom: 1px solid var(--line); font-weight: 650; }}
+.window-head {{ width: 100%; margin: 0; display: flex; justify-content: space-between; gap: 10px; padding: 10px; border: 0; border-bottom: 1px solid var(--line); border-radius: 0; background: transparent; color: var(--text); text-align: left; font-weight: 650; }}
+.window-head:hover {{ background: transparent; }} .window-head::before {{ content: "▾"; color: var(--muted); }} .window-collapsed .window-head {{ border-bottom: 0; }} .window-collapsed .window-head::before {{ content: "▸"; }} .window-body[hidden] {{ display: none !important; }}
 .window-meta {{ color: var(--muted); font-size: 12px; font-weight: 500; }}
 .tab-row {{ display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px; align-items: center; padding: 9px 10px; border-top: 1px solid var(--line); }}
 .tab-row:first-child {{ border-top: 0; }}
@@ -621,6 +622,7 @@ const edgeBrowserName = "edge";
 let lastActive = "";
 let autoConnectStarted = false;
 let activityVisible = false;
+let collapsedWindows = loadCollapsedWindows();
 
 async function loadInventory() {{
   const response = await fetch("/api/browsers", {{ cache: "no-store" }});
@@ -775,9 +777,14 @@ function renderScreenshot(latest, shots) {{
 function renderTabs(windows) {{
   const groups = [];
   for (const win of windows) {{
-    const group = el("section", {{ className: "window-group" }});
-    group.appendChild(el("div", {{ className: "window-head" }}, "Window " + (win.windowId ?? win.id ?? "-")));
-    group.firstChild.appendChild(el("span", {{ className: "window-meta" }}, (win.profile || (win.incognito ? "incognito" : "regular")) + " " + (win.focused ? "focused " : "") + (win.type || "") + " " + (win.state || "") + " · " + (win.tabCount || 0) + " tabs"));
+    const windowId = String(win.windowId ?? win.id ?? "-");
+    const collapsed = collapsedWindows.has(windowId);
+    const group = el("section", {{ className: "window-group" + (collapsed ? " window-collapsed" : "") }});
+    const head = el("button", {{ className: "window-head", onclick: () => toggleWindow(windowId) }}, "Window " + windowId);
+    head.appendChild(el("span", {{ className: "window-meta" }}, (win.profile || (win.incognito ? "incognito" : "regular")) + " " + (win.focused ? "focused " : "") + (win.type || "") + " " + (win.state || "") + " · " + (win.tabCount || 0) + " tabs"));
+    group.appendChild(head);
+    const bodyWrap = el("div", {{ className: "window-body" }});
+    bodyWrap.hidden = collapsed;
     for (const tab of win.tabs || []) {{
       const row = el("div", {{ className: "tab-row" + (tab.active ? " tab-active" : "") }});
       const body = el("div");
@@ -785,12 +792,21 @@ function renderTabs(windows) {{
       body.appendChild(el("div", {{ className: "tab-url" }}, (tab.profile || "") + " " + (tab.url || "")));
       row.appendChild(body);
       row.appendChild(el("button", {{ className: "tab-button", onclick: () => activateTab(tab.id) }}, "Activate"));
-      group.appendChild(row);
+      bodyWrap.appendChild(row);
     }}
+    group.appendChild(bodyWrap);
     groups.push(group);
   }}
   document.getElementById("tabsList").replaceChildren(...groups);
 }}
+
+function toggleWindow(windowId) {{
+  collapsedWindows.has(windowId) ? collapsedWindows.delete(windowId) : collapsedWindows.add(windowId);
+  localStorage.setItem("browserConnectionCollapsedWindows", JSON.stringify([...collapsedWindows]));
+  loadActivity().catch(error => console.error(error));
+}}
+
+function loadCollapsedWindows() {{ try {{ return new Set(JSON.parse(localStorage.getItem("browserConnectionCollapsedWindows") || "[]")); }} catch (_error) {{ return new Set(); }} }}
 
 function renderEvents(events) {{
   document.getElementById("eventLog").replaceChildren(...events.slice(0, 40).map(event => {{
