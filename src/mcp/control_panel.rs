@@ -515,154 +515,33 @@ fn control_panel_html(control_token: &str, project_id: &str) -> String {
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>browser-connection</title>
 <style>
-:root {{
-  color-scheme: light dark;
-  --bg: #f7f8fa;
-  --panel: #ffffff;
-  --text: #1b1f24;
-  --muted: #667085;
-  --line: #d0d7de;
-  --accent: #0f766e;
-  --accent-strong: #115e59;
-}}
+:root {{ color-scheme: light dark; --bg: #f7f8fa; --panel: #ffffff; --text: #1b1f24; --muted: #667085; --line: #d0d7de; --accent: #0f766e; --accent-strong: #115e59; }}
 @media (prefers-color-scheme: dark) {{
-  :root {{
-    --bg: #101418;
-    --panel: #171c22;
-    --text: #eef2f6;
-    --muted: #a9b4c0;
-    --line: #2b333d;
-    --accent: #2dd4bf;
-    --accent-strong: #5eead4;
-  }}
+  :root {{ --bg: #101418; --panel: #171c22; --text: #eef2f6; --muted: #a9b4c0; --line: #2b333d; --accent: #2dd4bf; --accent-strong: #5eead4; }}
 }}
 * {{ box-sizing: border-box; }}
 [hidden] {{ display: none !important; }}
-body {{
-  margin: 0;
-  min-height: 100vh;
-  background: var(--bg);
-  color: var(--text);
-  font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-}}
-.shell {{
-  display: grid;
-  grid-template-columns: minmax(240px, 320px) minmax(0, 1fr);
-  min-height: 100vh;
-}}
-aside {{
-  border-right: 1px solid var(--line);
-  background: var(--panel);
-  padding: 16px;
-}}
-main {{
-  min-width: 0;
-  min-height: 100vh;
-  display: flex;
-  flex-direction: column;
-}}
-h1 {{
-  margin: 0 0 16px;
-  font-size: 18px;
-  font-weight: 650;
-}}
-label {{
-  display: block;
-  margin-bottom: 6px;
-  color: var(--muted);
-  font-size: 12px;
-  font-weight: 650;
-  text-transform: uppercase;
-}}
-select, button {{
-  width: 100%;
-  min-height: 36px;
-  border: 1px solid var(--line);
-  border-radius: 6px;
-  background: var(--panel);
-  color: var(--text);
-  font: inherit;
-}}
+body {{ margin: 0; min-height: 100vh; background: var(--bg); color: var(--text); font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }}
+.shell {{ display: grid; grid-template-columns: minmax(240px, 320px) minmax(0, 1fr); min-height: 100vh; }}
+aside {{ border-right: 1px solid var(--line); background: var(--panel); padding: 16px; }}
+main {{ min-width: 0; min-height: 100vh; display: flex; flex-direction: column; }}
+h1 {{ margin: 0 0 16px; font-size: 18px; font-weight: 650; }}
+label {{ display: block; margin-bottom: 6px; color: var(--muted); font-size: 12px; font-weight: 650; text-transform: uppercase; }}
+select, button {{ width: 100%; min-height: 36px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); color: var(--text); font: inherit; }}
 select {{ padding: 0 10px; }}
-input {{
-  width: 100%;
-  min-height: 36px;
-  margin-bottom: 8px;
-  border: 1px solid var(--line);
-  border-radius: 6px;
-  background: var(--panel);
-  color: var(--text);
-  font: inherit;
-  padding: 0 10px;
-}}
-button {{
-  margin-top: 10px;
-  cursor: pointer;
-  background: var(--accent);
-  border-color: var(--accent);
-  color: #ffffff;
-  font-weight: 650;
-}}
+input {{ width: 100%; min-height: 36px; margin-bottom: 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); color: var(--text); font: inherit; padding: 0 10px; }}
+button {{ margin-top: 10px; cursor: pointer; background: var(--accent); border-color: var(--accent); color: #ffffff; font-weight: 650; }}
 button:hover {{ background: var(--accent-strong); }}
-.meta {{
-  margin-top: 16px;
-  display: grid;
-  gap: 8px;
-  color: var(--muted);
-  font-size: 13px;
-  overflow-wrap: anywhere;
-}}
-.share {{
-  margin-top: 18px;
-  padding-top: 16px;
-  border-top: 1px solid var(--line);
-}}
-.connect {{
-  margin-top: 14px;
-  padding-top: 14px;
-  border-top: 1px solid var(--line);
-}}
-.connect-status {{
-  margin-top: 8px;
-  min-height: 34px;
-  color: var(--muted);
-  font-size: 12px;
-  line-height: 1.35;
-  overflow-wrap: anywhere;
-}}
+.meta {{ margin-top: 16px; display: grid; gap: 8px; color: var(--muted); font-size: 13px; overflow-wrap: anywhere; }}
+.share {{ margin-top: 18px; padding-top: 16px; border-top: 1px solid var(--line); }}
+.connect {{ margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--line); }}
+.connect-status {{ margin-top: 8px; min-height: 34px; color: var(--muted); font-size: 12px; line-height: 1.35; overflow-wrap: anywhere; }}
 .meta strong {{ color: var(--text); font-weight: 650; }}
-.toolbar {{
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  min-height: 44px;
-  padding: 8px 12px;
-  border-bottom: 1px solid var(--line);
-  background: var(--panel);
-}}
-.toolbar a {{
-  color: var(--accent-strong);
-  text-decoration: none;
-  font-weight: 650;
-}}
-.frame {{
-  flex: 1;
-  min-height: 0;
-  border: 0;
-  background: #000;
-}}
-.empty {{
-  flex: 1;
-  display: grid;
-  place-items: center;
-  color: var(--muted);
-}}
-.activity {{
-  flex: 1;
-  min-height: 0;
-  overflow: auto;
-  padding: 14px;
-}}
+.toolbar {{ display: flex; align-items: center; gap: 10px; min-height: 44px; padding: 8px 12px; border-bottom: 1px solid var(--line); background: var(--panel); }}
+.toolbar a {{ color: var(--accent-strong); text-decoration: none; font-weight: 650; }}
+.frame {{ flex: 1; min-height: 0; border: 0; background: #000; }}
+.empty {{ flex: 1; display: grid; place-items: center; color: var(--muted); }}
+.activity {{ flex: 1; min-height: 0; overflow: auto; padding: 14px; }}
 .activity-grid {{ display: grid; grid-template-columns: minmax(260px, 1fr) minmax(260px, 1fr); gap: 14px; }}
 .activity-panel {{ border: 1px solid var(--line); border-radius: 6px; background: var(--panel); padding: 12px; min-width: 0; }}
 .activity h2 {{ margin: 0 0 10px; font-size: 14px; }}
@@ -671,6 +550,14 @@ button:hover {{ background: var(--accent-strong); }}
 .stat strong, .row strong {{ display: block; font-size: 18px; }}
 .row {{ border-top: 1px solid var(--line); padding: 8px 0; color: var(--muted); overflow-wrap: anywhere; white-space: pre-wrap; }}
 .row:first-child {{ border-top: 0; padding-top: 0; }}
+.window-group {{ border: 1px solid var(--line); border-radius: 6px; margin: 10px 0; overflow: hidden; background: color-mix(in srgb, var(--panel) 88%, var(--line)); }}
+.window-head {{ display: flex; justify-content: space-between; gap: 10px; padding: 10px; border-bottom: 1px solid var(--line); font-weight: 650; }}
+.window-meta {{ color: var(--muted); font-size: 12px; font-weight: 500; }}
+.tab-row {{ display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px; align-items: center; padding: 9px 10px; border-top: 1px solid var(--line); }}
+.tab-row:first-child {{ border-top: 0; }}
+.tab-title {{ font-weight: 600; overflow-wrap: anywhere; }}
+.tab-url {{ color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }}
+.tab-active {{ box-shadow: inset 3px 0 0 var(--accent); }}
 .thumbs {{ display: flex; gap: 8px; overflow-x: auto; margin-top: 8px; }}
 .thumbs img {{ width: 96px; height: 64px; object-fit: cover; border: 1px solid var(--line); border-radius: 4px; }}
 #latestScreenshot {{ width: 100%; max-height: 46vh; object-fit: contain; background: #000; border-radius: 4px; }}
@@ -866,7 +753,7 @@ function renderActivity(activity) {{
   text("tabCount", tabs.totalTabs || 0);
   text("eventCount", events.length);
   const active = tabs.activeTab || null;
-  document.getElementById("activeTab").textContent = active ? (active.title || "(untitled)") + "\\n" + (active.url || "") : "-";
+  document.getElementById("activeTab").textContent = active ? (active.title || "(untitled)") + "\n" + (active.url || "") : "-";
   const err = document.getElementById("tabsError");
   err.hidden = !activity.tabsError;
   err.textContent = activity.tabsError || "";
@@ -886,23 +773,30 @@ function renderScreenshot(latest, shots) {{
 }}
 
 function renderTabs(windows) {{
-  const rows = [];
+  const groups = [];
   for (const win of windows) {{
-    rows.push(el("div", {{ className: "row" }}, "Window " + (win.windowId ?? win.id ?? "-") + " " + (win.profile || (win.incognito ? "incognito" : "regular")) + " " + (win.focused ? "focused " : "") + (win.type || "") + " " + (win.state || "") + "\\n" + (win.tabCount || 0) + " tabs"));
+    const group = el("section", {{ className: "window-group" }});
+    group.appendChild(el("div", {{ className: "window-head" }}, "Window " + (win.windowId ?? win.id ?? "-")));
+    group.firstChild.appendChild(el("span", {{ className: "window-meta" }}, (win.profile || (win.incognito ? "incognito" : "regular")) + " " + (win.focused ? "focused " : "") + (win.type || "") + " " + (win.state || "") + " · " + (win.tabCount || 0) + " tabs"));
     for (const tab of win.tabs || []) {{
-      const row = el("div", {{ className: "row" }}, (tab.active ? "Active: " : "") + (tab.profile || "") + " " + (tab.title || "(untitled)") + "\\n" + (tab.url || ""));
+      const row = el("div", {{ className: "tab-row" + (tab.active ? " tab-active" : "") }});
+      const body = el("div");
+      body.appendChild(el("div", {{ className: "tab-title" }}, (tab.active ? "Active: " : "") + (tab.title || "(untitled)")));
+      body.appendChild(el("div", {{ className: "tab-url" }}, (tab.profile || "") + " " + (tab.url || "")));
+      row.appendChild(body);
       row.appendChild(el("button", {{ className: "tab-button", onclick: () => activateTab(tab.id) }}, "Activate"));
-      rows.push(row);
+      group.appendChild(row);
     }}
+    groups.push(group);
   }}
-  document.getElementById("tabsList").replaceChildren(...rows);
+  document.getElementById("tabsList").replaceChildren(...groups);
 }}
 
 function renderEvents(events) {{
   document.getElementById("eventLog").replaceChildren(...events.slice(0, 40).map(event => {{
     const status = event.ok ? "ok" : "error";
     const summary = event.error || event.result?.url || event.result?.title || event.result?.text || "";
-    return el("div", {{ className: "row" }}, new Date(event.at).toLocaleTimeString() + " " + event.tool + " " + status + " " + event.durationMs + "ms\\n" + String(summary).slice(0, 240));
+    return el("div", {{ className: "row" }}, new Date(event.at).toLocaleTimeString() + " " + event.tool + " " + status + " " + event.durationMs + "ms\n" + String(summary).slice(0, 240));
   }}));
 }}
 
