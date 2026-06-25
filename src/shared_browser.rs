@@ -23,7 +23,7 @@ use tungstenite::{accept_hdr_with_config, connect, Error as WsError, Message, We
 pub const DEFAULT_RELAY_BIND: &str = "127.0.0.1:8765";
 pub const MAX_SESSION_ID_BYTES: usize = 128;
 pub const MAX_TOKEN_BYTES: usize = 512;
-pub const MAX_JSON_MESSAGE_BYTES: usize = 256 * 1024;
+pub const MAX_JSON_MESSAGE_BYTES: usize = 8 * 1024 * 1024;
 pub const MAX_SESSIONS: usize = 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -203,6 +203,14 @@ impl SharedBrowserClient {
 
     pub fn screenshot(&self, full_page: bool) -> Result<String> {
         self.call_text("screenshot", json!({ "fullPage": full_page }))
+    }
+
+    pub fn list_tabs(&self) -> Result<Value> {
+        self.call("list_tabs", json!({}))
+    }
+
+    pub fn activate_tab(&self, tab_id: i64) -> Result<String> {
+        self.call_text("activate_tab", json!({ "tabId": tab_id }))
     }
 
     fn call_text(&self, command: &str, params: Value) -> Result<String> {

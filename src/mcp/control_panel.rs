@@ -204,6 +204,26 @@ fn route_request(
         ("OPTIONS", _) => empty_response(204, "No Content"),
         ("GET", "/") | ("GET", "/index.html") => control_panel_response(runtime, control_token),
         ("GET", "/api/browsers") => browser_inventory_response(runtime),
+        ("GET", "/api/activity") => {
+            if !has_valid_control_token(request, control_token) {
+                return json_response(
+                    403,
+                    "Forbidden",
+                    json!({ "error": "invalid control token" }),
+                );
+            }
+            activity_response(runtime, request)
+        }
+        ("POST", "/api/activate-tab") | ("GET", "/api/activate-tab") => {
+            if !has_valid_control_token(request, control_token) {
+                return json_response(
+                    403,
+                    "Forbidden",
+                    json!({ "error": "invalid control token" }),
+                );
+            }
+            activate_tab_response(runtime, request)
+        }
         ("POST", "/api/share") | ("GET", "/api/share") => {
             if !has_valid_control_token(request, control_token) {
                 return json_response(
@@ -272,6 +292,46 @@ fn browser_inventory_response(runtime: Arc<Mutex<McpRuntime>>) -> HttpResponse {
             "Internal Server Error",
             json!({ "error": error.to_string() }),
         ),
+    }
+}
+
+fn activity_response(runtime: Arc<Mutex<McpRuntime>>, request: &HttpRequest) -> HttpResponse {
+    let refresh = query_param(&request.target, "refresh").as_deref() == Some("1");
+    let result = runtime
+        .lock()
+        .map_err(|_| anyhow!("MCP runtime lock was poisoned"))
+        .map(|mut runtime| runtime.browser_activity(refresh));
+    match result {
+        Ok(activity) => json_response(200, "OK", activity),
+        Err(error) => json_response(
+            500,
+            "Internal Server Error",
+            json!({ "error": error.to_string() }),
+        ),
+    }
+}
+
+fn activate_tab_response(runtime: Arc<Mutex<McpRuntime>>, request: &HttpRequest) -> HttpResponse {
+    let Some(tab_id) =
+        query_param(&request.target, "tab_id").or_else(|| query_param(&request.body, "tab_id"))
+    else {
+        return json_response(400, "Bad Request", json!({ "error": "tab_id is required" }));
+    };
+    let Ok(tab_id) = tab_id.parse::<i64>() else {
+        return json_response(
+            400,
+            "Bad Request",
+            json!({ "error": "tab_id must be an integer" }),
+        );
+    };
+
+    let result = runtime
+        .lock()
+        .map_err(|_| anyhow!("MCP runtime lock was poisoned"))
+        .and_then(|mut runtime| runtime.activate_shared_tab_from_panel(tab_id));
+    match result {
+        Ok(value) => json_response(200, "OK", value),
+        Err(error) => json_response(400, "Bad Request", json!({ "error": error.to_string() })),
     }
 }
 
@@ -477,6 +537,7 @@ fn control_panel_html(control_token: &str, project_id: &str) -> String {
   }}
 }}
 * {{ box-sizing: border-box; }}
+[hidden] {{ display: none !important; }}
 body {{
   margin: 0;
   min-height: 100vh;
@@ -596,10 +657,30 @@ button:hover {{ background: var(--accent-strong); }}
   place-items: center;
   color: var(--muted);
 }}
+.activity {{
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 14px;
+}}
+.activity-grid {{ display: grid; grid-template-columns: minmax(260px, 1fr) minmax(260px, 1fr); gap: 14px; }}
+.activity-panel {{ border: 1px solid var(--line); border-radius: 6px; background: var(--panel); padding: 12px; min-width: 0; }}
+.activity h2 {{ margin: 0 0 10px; font-size: 14px; }}
+.stats {{ display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; margin-bottom: 14px; }}
+.stat {{ border: 1px solid var(--line); border-radius: 6px; padding: 8px; background: var(--panel); min-width: 0; }}
+.stat strong, .row strong {{ display: block; font-size: 18px; }}
+.row {{ border-top: 1px solid var(--line); padding: 8px 0; color: var(--muted); overflow-wrap: anywhere; white-space: pre-wrap; }}
+.row:first-child {{ border-top: 0; padding-top: 0; }}
+.thumbs {{ display: flex; gap: 8px; overflow-x: auto; margin-top: 8px; }}
+.thumbs img {{ width: 96px; height: 64px; object-fit: cover; border: 1px solid var(--line); border-radius: 4px; }}
+#latestScreenshot {{ width: 100%; max-height: 46vh; object-fit: contain; background: #000; border-radius: 4px; }}
+.tab-button {{ margin: 6px 0 0; min-height: 28px; width: auto; padding: 0 10px; font-size: 12px; }}
+.error {{ color: #ef4444; }}
 @media (max-width: 760px) {{
   .shell {{ grid-template-columns: 1fr; }}
   aside {{ border-right: 0; border-bottom: 1px solid var(--line); }}
   main {{ min-height: 70vh; }}
+  .activity-grid, .stats {{ grid-template-columns: 1fr; }}
 }}
 </style>
 </head>
@@ -630,6 +711,19 @@ button:hover {{ background: var(--accent-strong); }}
     <div class="toolbar"><a id="openNovnc" href="#" target="_blank" rel="noreferrer">Open noVNC</a></div>
     <iframe id="novncFrame" class="frame" title="noVNC"></iframe>
     <div id="emptyState" class="empty" hidden>No noVNC display</div>
+    <section id="activityPanel" class="activity" hidden>
+      <div class="stats">
+        <div class="stat"><label>Mode</label><strong id="activityMode">-</strong></div>
+        <div class="stat"><label>Windows</label><strong id="windowCount">0</strong></div>
+        <div class="stat"><label>Tabs</label><strong id="tabCount">0</strong></div>
+        <div class="stat"><label>Events</label><strong id="eventCount">0</strong></div>
+      </div>
+      <div class="activity-grid">
+        <section class="activity-panel"><h2>Screenshot</h2><img id="latestScreenshot" alt="" hidden><div id="screenshotEmpty" class="row">No screenshots yet</div><div id="screenshotThumbs" class="thumbs"></div></section>
+        <section class="activity-panel"><h2>Tabs</h2><div id="activeTab" class="row">-</div><div id="tabsError" class="row error" hidden></div><div id="tabsList"></div></section>
+        <section class="activity-panel"><h2>Activity</h2><div id="eventLog"></div></section>
+      </div>
+    </section>
   </main>
 </div>
 <script>
@@ -639,6 +733,7 @@ const controlToken = "{control_token}";
 const edgeBrowserName = "edge";
 let lastActive = "";
 let autoConnectStarted = false;
+let activityVisible = false;
 
 async function loadInventory() {{
   const response = await fetch("/api/browsers", {{ cache: "no-store" }});
@@ -666,19 +761,22 @@ function renderInventory(inventory) {{
   document.getElementById("activeName").textContent = inventory.active || "-";
   document.getElementById("cdpEndpoint").textContent = active?.cdpEndpoint || "-";
   document.getElementById("novncUrl").textContent = active?.novncUrl || "-";
-  setFrame(active?.novncUrl || "");
+  setFrame(active?.novncUrl || "", active?.kind === "shared-extension");
 }}
 
-function setFrame(url) {{
+function setFrame(url, showActivity) {{
   const frame = document.getElementById("novncFrame");
   const empty = document.getElementById("emptyState");
+  const activity = document.getElementById("activityPanel");
   const link = document.getElementById("openNovnc");
   link.href = url || "#";
   link.style.pointerEvents = url ? "auto" : "none";
   link.style.opacity = url ? "1" : "0.45";
+  activityVisible = !url && showActivity;
+  activity.hidden = !activityVisible;
   if (!url) {{
     frame.hidden = true;
-    empty.hidden = false;
+    empty.hidden = activityVisible;
     frame.removeAttribute("src");
     lastActive = "";
     return;
@@ -752,6 +850,73 @@ function maybeAutoConnectEdge() {{
   connectEdge(true).catch(error => setConnectStatus(error.message || String(error)));
 }}
 
+async function loadActivity() {{
+  if (!activityVisible) return;
+  const response = await apiFetch("/api/activity?refresh=1", {{ cache: "no-store" }});
+  if (!response.ok) throw new Error(await response.text());
+  renderActivity(await response.json());
+}}
+
+function renderActivity(activity) {{
+  const tabs = activity.tabs || {{}};
+  const events = activity.events || [];
+  const shots = activity.screenshots || [];
+  text("activityMode", activity.mode || "-");
+  text("windowCount", tabs.totalWindows || 0);
+  text("tabCount", tabs.totalTabs || 0);
+  text("eventCount", events.length);
+  const active = tabs.activeTab || null;
+  document.getElementById("activeTab").textContent = active ? (active.title || "(untitled)") + "\\n" + (active.url || "") : "-";
+  const err = document.getElementById("tabsError");
+  err.hidden = !activity.tabsError;
+  err.textContent = activity.tabsError || "";
+  renderScreenshot(activity.latestScreenshot, shots);
+  renderTabs(tabs.windows || []);
+  renderEvents(events);
+}}
+
+function renderScreenshot(latest, shots) {{
+  const image = document.getElementById("latestScreenshot");
+  const empty = document.getElementById("screenshotEmpty");
+  image.hidden = !latest?.dataUrl;
+  empty.hidden = !!latest?.dataUrl;
+  if (latest?.dataUrl) image.src = latest.dataUrl;
+  const thumbs = document.getElementById("screenshotThumbs");
+  thumbs.replaceChildren(...shots.slice(0, 8).filter(s => s.dataUrl).map(s => el("img", {{ src: s.dataUrl, title: new Date(s.at).toLocaleTimeString() }})));
+}}
+
+function renderTabs(windows) {{
+  const rows = [];
+  for (const win of windows) for (const tab of win.tabs || []) {{
+    const row = el("div", {{ className: "row" }}, (tab.active ? "Active: " : "") + (tab.title || "(untitled)") + "\\n" + (tab.url || ""));
+    row.appendChild(el("button", {{ className: "tab-button", onclick: () => activateTab(tab.id) }}, "Activate"));
+    rows.push(row);
+  }}
+  document.getElementById("tabsList").replaceChildren(...rows);
+}}
+
+function renderEvents(events) {{
+  document.getElementById("eventLog").replaceChildren(...events.slice(0, 40).map(event => {{
+    const status = event.ok ? "ok" : "error";
+    const summary = event.error || event.result?.url || event.result?.title || event.result?.text || "";
+    return el("div", {{ className: "row" }}, new Date(event.at).toLocaleTimeString() + " " + event.tool + " " + status + " " + event.durationMs + "ms\\n" + String(summary).slice(0, 240));
+  }}));
+}}
+
+async function activateTab(tabId) {{
+  if (!Number.isInteger(tabId)) return;
+  await apiFetch("/api/activate-tab?tab_id=" + encodeURIComponent(tabId), {{ method: "POST" }});
+  await loadActivity();
+}}
+
+function text(id, value) {{ document.getElementById(id).textContent = value; }}
+function el(tag, props = {{}}, body = "") {{
+  const node = document.createElement(tag);
+  Object.assign(node, props);
+  if (body) node.textContent = body;
+  return node;
+}}
+
 function setConnectStatus(message) {{
   document.getElementById("connectStatus").textContent = message;
 }}
@@ -782,6 +947,7 @@ window.addEventListener("browserConnection#initialized", maybeAutoConnectEdge);
 setTimeout(maybeAutoConnectEdge, 300);
 loadInventory().catch(error => console.error(error));
 setInterval(() => loadInventory().catch(error => console.error(error)), 1000);
+setInterval(() => loadActivity().catch(error => console.error(error)), 1000);
 </script>
 </body>
 </html>

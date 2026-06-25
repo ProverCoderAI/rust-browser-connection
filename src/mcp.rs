@@ -16,19 +16,21 @@ use crate::browser_target::{
     normalize_share_url, normalize_vnc_endpoint, upsert_browser_endpoint, upsert_browser_novnc_url,
     upsert_browser_share_url, upsert_browser_vnc_endpoint,
 };
-use crate::cdp::CdpClient;
 use crate::shared_browser::SharedBrowserClient;
 use crate::{
     compute_browser_ports, render_browser_control_panel_url_for_port,
     render_browser_target_novnc_url, render_cdp_url, render_cdp_url_for_ports, BrowserConnection,
 };
+use activity::BrowserActivityLog;
 use anyhow::{anyhow, Context, Result};
 use serde_json::{json, Value};
 use std::env;
 use std::io::{BufRead, Write};
 use std::sync::{Arc, Mutex};
 
+mod activity;
 mod control_panel;
+mod tools;
 
 pub use crate::browser_target::{
     active_browser_from_env, browser_endpoints_from_env, parse_named_browser_endpoint,
@@ -189,11 +191,12 @@ where
     Ok(())
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 struct McpRuntime {
     config: McpServerConfig,
     managed_cdp_endpoint: Option<String>,
     active_browser: String,
+    activity: BrowserActivityLog,
 }
 
 impl McpRuntime {
@@ -211,6 +214,7 @@ impl McpRuntime {
             config,
             managed_cdp_endpoint: None,
             active_browser,
+            activity: BrowserActivityLog::new(),
         };
         runtime.ensure_browser_exists(&runtime.active_browser)?;
         Ok(runtime)
@@ -249,6 +253,82 @@ impl McpRuntime {
             .iter()
             .find(|endpoint| endpoint.name == name)
             .and_then(|endpoint| endpoint.share_url.clone())
+    }
+
+    fn active_browser_mode(&self) -> String {
+        match self.active_browser.as_str() {
+            MANAGED_BROWSER_NAME => "managed".to_string(),
+            EXPLICIT_BROWSER_NAME => "explicit".to_string(),
+            name => self
+                .config
+                .browser_endpoints
+                .iter()
+                .find(|endpoint| endpoint.name == name)
+                .map(browser_endpoint_kind)
+                .unwrap_or("unknown")
+                .to_string(),
+        }
+    }
+
+    fn browser_activity(&mut self, refresh: bool) -> Value {
+        if refresh {
+            self.refresh_active_shared_tabs();
+        }
+        self.activity
+            .snapshot(&self.active_browser, &self.active_browser_mode())
+    }
+
+    fn refresh_active_shared_tabs(&mut self) {
+        let Some(share_url) = self.active_share_url() else {
+            self.activity.clear_tabs();
+            return;
+        };
+        match SharedBrowserClient::new(share_url).list_tabs() {
+            Ok(tabs) => self.activity.record_tabs(tabs),
+            Err(error) => self.activity.record_tab_error(error),
+        }
+    }
+
+    fn record_tool_activity(
+        &mut self,
+        tool: &str,
+        arguments: &Value,
+        started_at_ms: u64,
+        result: &Result<String>,
+    ) {
+        let browser = self.active_browser.clone();
+        let mode = self.active_browser_mode();
+        self.activity
+            .record_tool_result(&browser, &mode, tool, arguments, started_at_ms, result);
+
+        let Ok(text) = result else {
+            return;
+        };
+        if tool == "browser_list_tabs" {
+            match serde_json::from_str::<Value>(text) {
+                Ok(tabs) => self.activity.record_tabs(tabs),
+                Err(error) => self.activity.record_tab_error(error),
+            }
+            return;
+        }
+        if self.active_share_url().is_some() && refresh_tabs_after_tool(tool) {
+            self.refresh_active_shared_tabs();
+        }
+    }
+
+    fn activate_shared_tab_from_panel(&mut self, tab_id: i64) -> Result<Value> {
+        let started_at_ms = activity::now_ms();
+        let result = self
+            .active_share_url()
+            .ok_or_else(|| anyhow!("active browser is not a shared-extension browser"))
+            .and_then(|share_url| SharedBrowserClient::new(share_url).activate_tab(tab_id));
+        let arguments = json!({ "tab_id": tab_id, "source": "control_panel" });
+        self.record_tool_activity("browser_activate_tab", &arguments, started_at_ms, &result);
+        result
+            .and_then(|text| {
+                serde_json::from_str::<Value>(&text).or_else(|_| Ok(json!({ "result": text })))
+            })
+            .context("failed to activate shared browser tab")
     }
 
     fn managed_cdp_endpoint(&mut self) -> Result<String> {
@@ -537,6 +617,20 @@ fn browser_endpoint_kind(endpoint: &NamedBrowserEndpoint) -> &'static str {
     }
 }
 
+fn refresh_tabs_after_tool(tool: &str) -> bool {
+    matches!(
+        tool,
+        "browser_navigate"
+            | "browser_snapshot"
+            | "browser_evaluate"
+            | "browser_click"
+            | "browser_type"
+            | "browser_press_key"
+            | "browser_take_screenshot"
+            | "browser_activate_tab"
+    )
+}
+
 fn managed_novnc_url(config: &McpServerConfig) -> String {
     if !config.start_browser {
         return crate::render_novnc_url();
@@ -736,8 +830,8 @@ fn handle_message(runtime: &mut McpRuntime, message: &str) -> Result<Option<Valu
             Ok(protocol_version) => success_response(id, initialize_result(protocol_version)),
             Err(error) => error_response(id, -32602, &error.to_string()),
         },
-        "tools/list" => success_response(id, json!({ "tools": tool_definitions() })),
-        "tools/call" => success_response(id, handle_tool_call(runtime, &request)),
+        "tools/list" => success_response(id, json!({ "tools": tools::tool_definitions() })),
+        "tools/call" => success_response(id, tools::handle_tool_call(runtime, &request)),
         _ => error_response(id, -32601, &format!("Unknown MCP method: {method}")),
     };
 
@@ -768,180 +862,6 @@ fn initialize_result(protocol_version: &str) -> Value {
             "name": SERVER_NAME,
             "version": env!("CARGO_PKG_VERSION")
         }
-    })
-}
-
-fn tool_definitions() -> Vec<Value> {
-    vec![
-        tool(
-            "browser_list",
-            "List available browser targets and show which target is active.",
-            json!({}),
-            vec![],
-        ),
-        tool(
-            "browser_select",
-            "Switch the active browser target by name, optionally registering CDP and display endpoints first.",
-            json!({
-                "name": { "type": "string", "description": "Browser target name, e.g. managed or personal" },
-                "cdp_endpoint": { "type": "string", "description": "Optional CDP endpoint to register for this browser name" },
-                "vnc_endpoint": { "type": "string", "description": "Optional VNC endpoint to register as HOST:PORT" },
-                "novnc_url": { "type": "string", "description": "Optional pre-existing noVNC URL for this browser name" },
-                "share_url": { "type": "string", "description": "Optional shared browser extension link for this browser name" }
-            }),
-            vec!["name"],
-        ),
-        tool(
-            "browser_navigate",
-            "Navigate the active browser page to a URL through the Rust CDP adapter.",
-            json!({ "url": { "type": "string", "description": "Absolute URL to open" } }),
-            vec!["url"],
-        ),
-        tool(
-            "browser_snapshot",
-            "Return page title, URL, visible text and simple interactive element selectors.",
-            json!({}),
-            vec![],
-        ),
-        tool(
-            "browser_evaluate",
-            "Evaluate JavaScript in the current page and return a JSON/text result.",
-            json!({ "expression": { "type": "string", "description": "JavaScript expression" } }),
-            vec!["expression"],
-        ),
-        tool(
-            "browser_click",
-            "Click an element by CSS selector in the current page.",
-            json!({ "selector": { "type": "string", "description": "CSS selector" } }),
-            vec!["selector"],
-        ),
-        tool(
-            "browser_type",
-            "Set text in an input-like element by CSS selector and dispatch input/change events.",
-            json!({
-                "selector": { "type": "string", "description": "CSS selector" },
-                "text": { "type": "string", "description": "Text to type" }
-            }),
-            vec!["selector", "text"],
-        ),
-        tool(
-            "browser_press_key",
-            "Press a key through CDP Input.dispatchKeyEvent.",
-            json!({ "key": { "type": "string", "description": "Key name, e.g. Enter or a" } }),
-            vec!["key"],
-        ),
-        tool(
-            "browser_take_screenshot",
-            "Capture a PNG screenshot and return it as a data URL.",
-            json!({ "full_page": { "type": "boolean", "description": "Capture beyond viewport", "default": true } }),
-            vec![],
-        ),
-    ]
-}
-
-fn tool(name: &str, description: &str, properties: Value, required: Vec<&str>) -> Value {
-    json!({
-        "name": name,
-        "description": description,
-        "inputSchema": {
-            "type": "object",
-            "properties": properties,
-            "required": required
-        }
-    })
-}
-
-fn handle_tool_call(runtime: &mut McpRuntime, request: &Value) -> Value {
-    let params = request.get("params").unwrap_or(&Value::Null);
-    let name = params.get("name").and_then(Value::as_str).unwrap_or("");
-    let arguments = params.get("arguments").unwrap_or(&Value::Null);
-
-    let result = match name {
-        "browser_list" => runtime.browser_inventory_text(),
-        "browser_select" => runtime.select_browser(
-            required_str(arguments, "name").unwrap_or(""),
-            arguments.get("cdp_endpoint").and_then(Value::as_str),
-            arguments.get("vnc_endpoint").and_then(Value::as_str),
-            arguments.get("novnc_url").and_then(Value::as_str),
-            arguments.get("share_url").and_then(Value::as_str),
-        ),
-        _ => runtime.ensure_active_display().and_then(|_| {
-            if let Some(share_url) = runtime.active_share_url() {
-                dispatch_shared_tool(&share_url, name, arguments)
-            } else {
-                runtime
-                    .cdp_endpoint()
-                    .and_then(|cdp_endpoint| dispatch_tool(&cdp_endpoint, name, arguments))
-            }
-        }),
-    };
-    match result {
-        Ok(text) => tool_result(text, false),
-        Err(error) => tool_result(format!("{error:#}"), true),
-    }
-}
-
-fn dispatch_tool(cdp_endpoint: &str, name: &str, arguments: &Value) -> Result<String> {
-    let client = CdpClient::new(cdp_endpoint);
-    match name {
-        "browser_navigate" => client.navigate(required_str(arguments, "url")?),
-        "browser_snapshot" => client.snapshot(),
-        "browser_evaluate" => client.evaluate(required_str(arguments, "expression")?),
-        "browser_click" => client.click(required_str(arguments, "selector")?),
-        "browser_type" => client.type_text(
-            required_str(arguments, "selector")?,
-            required_str(arguments, "text")?,
-        ),
-        "browser_press_key" => client.press_key(required_str(arguments, "key")?),
-        "browser_take_screenshot" => {
-            let full_page = arguments
-                .get("full_page")
-                .and_then(Value::as_bool)
-                .unwrap_or(true);
-            client.screenshot(full_page)
-        }
-        "" => Err(anyhow!("tools/call params.name is required")),
-        _ => Err(anyhow!("Unknown browser-connection tool: {name}")),
-    }
-}
-
-fn dispatch_shared_tool(share_url: &str, name: &str, arguments: &Value) -> Result<String> {
-    let client = SharedBrowserClient::new(share_url);
-    match name {
-        "browser_navigate" => client.navigate(required_str(arguments, "url")?),
-        "browser_snapshot" => client.snapshot(),
-        "browser_evaluate" => client.evaluate(required_str(arguments, "expression")?),
-        "browser_click" => client.click(required_str(arguments, "selector")?),
-        "browser_type" => client.type_text(
-            required_str(arguments, "selector")?,
-            required_str(arguments, "text")?,
-        ),
-        "browser_press_key" => client.press_key(required_str(arguments, "key")?),
-        "browser_take_screenshot" => {
-            let full_page = arguments
-                .get("full_page")
-                .and_then(Value::as_bool)
-                .unwrap_or(true);
-            client.screenshot(full_page)
-        }
-        "" => Err(anyhow!("tools/call params.name is required")),
-        _ => Err(anyhow!("Unknown browser-connection tool: {name}")),
-    }
-}
-
-fn required_str<'a>(arguments: &'a Value, name: &str) -> Result<&'a str> {
-    arguments
-        .get(name)
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| anyhow!("argument `{name}` is required"))
-}
-
-fn tool_result(text: String, is_error: bool) -> Value {
-    json!({
-        "content": [{ "type": "text", "text": text }],
-        "isError": is_error
     })
 }
 
