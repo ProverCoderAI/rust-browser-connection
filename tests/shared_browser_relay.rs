@@ -179,3 +179,73 @@ fn mcp_navigates_shared_browser_through_relay_link() {
         "Navigated remote Edge"
     );
 }
+
+#[test]
+fn browserctl_navigates_shared_browser_through_relay_link_without_mcp() {
+    let relay_port = unused_local_port();
+    let relay_bind = format!("127.0.0.1:{relay_port}");
+    let relay = Command::new(env!("CARGO_BIN_EXE_browser-connection-relay"))
+        .args(["--bind", &relay_bind])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn browser-connection-relay");
+
+    let session = "browserctl-session-test";
+    let agent_token = "agent-token";
+    let browser_url = format!(
+        "ws://127.0.0.1:{relay_port}/ws/browser/{session}?token=browser-token&agent_token={agent_token}"
+    );
+    let (ready_tx, ready_rx) = mpsc::channel();
+    let browser_thread = thread::spawn(move || {
+        let mut socket = retry_browser_connect(&browser_url);
+        ready_tx.send(()).expect("signal browser websocket ready");
+        loop {
+            let message = socket.read().expect("read relayed browser command");
+            if let Message::Text(text) = message {
+                let request: Value = serde_json::from_str(&text).expect("request is JSON");
+                assert_eq!(request["command"], "navigate");
+                assert_eq!(request["params"]["url"], "https://example.com/");
+                socket
+                    .send(Message::Text(
+                        json!({
+                            "id": request["id"].clone(),
+                            "ok": true,
+                            "result": "Navigated remote Edge through CLI"
+                        })
+                        .to_string(),
+                    ))
+                    .expect("send relayed browser response");
+                break;
+            }
+        }
+    });
+    ready_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("browser websocket connects to relay");
+
+    let share_url = format!("http://127.0.0.1:{relay_port}/share/{session}#agent={agent_token}");
+    let output = Command::new(env!("CARGO_BIN_EXE_browserctl"))
+        .args([
+            "--share-url",
+            &share_url,
+            "navigate",
+            "https://example.com/",
+        ])
+        .output()
+        .expect("run browserctl");
+
+    stop_child(relay);
+    browser_thread.join().expect("browser thread exits");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).trim(),
+        "Navigated remote Edge through CLI"
+    );
+}

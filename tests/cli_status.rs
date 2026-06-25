@@ -43,3 +43,30 @@ fn root_help_exposes_stop_command_without_docker() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("stop"));
 }
+
+#[test]
+fn browserctl_help_exposes_browser_actions_without_mcp() {
+    let output = Command::new(env!("CARGO_BIN_EXE_browserctl"))
+        .args(["--help"])
+        .output()
+        .expect("Failed to execute browserctl");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("snapshot"));
+    assert!(stdout.contains("navigate"));
+    assert!(stdout.contains("--share-url"));
+    assert!(stdout.contains("--cdp-url"));
+}
+
+#[test]
+fn browserctl_eval_requires_expression_or_file_before_network() {
+    let output = Command::new(env!("CARGO_BIN_EXE_browserctl"))
+        .args(["--cdp-url", "http://127.0.0.1:1", "eval"])
+        .output()
+        .expect("Failed to execute browserctl");
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("eval requires --expression or --file"));
+}

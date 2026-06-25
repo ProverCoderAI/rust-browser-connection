@@ -184,6 +184,35 @@ mcp_servers:
     connect_timeout: 60
 ```
 
+## CLI browser automation
+
+Use `browserctl` when an agent should drive the browser with normal commands instead of MCP tool
+calls. It can target a shared Edge extension link, a direct CDP endpoint, or the active browser from
+the local `browser-connection` control panel.
+
+```bash
+browserctl --project dg-my-project snapshot
+browserctl --project dg-my-project navigate https://example.com
+browserctl --project dg-my-project click 'button[type="submit"]'
+browserctl --project dg-my-project type 'input[name="q"]' 'search text'
+browserctl --project dg-my-project key Enter
+browserctl --project dg-my-project eval --expression 'document.title'
+browserctl --project dg-my-project eval --file /tmp/browser-task.js
+browserctl --project dg-my-project screenshot --full-page --output /tmp/page.png
+browserctl --project dg-my-project tabs
+browserctl --project dg-my-project activate-tab 123
+```
+
+Direct targets bypass the control panel:
+
+```bash
+browserctl --share-url "$EDGE_SHARE_URL" snapshot
+browserctl --cdp-url http://127.0.0.1:9223 snapshot
+```
+
+Add `--json` for machine-readable output and `--trace-dir .browser-trace` to append
+`browserctl.jsonl` audit events.
+
 ## MCP tools
 
 ```text

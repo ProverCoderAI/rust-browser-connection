@@ -1,8 +1,7 @@
 use super::activity;
 use super::McpRuntime;
-use crate::cdp::CdpClient;
-use crate::shared_browser::SharedBrowserClient;
-use anyhow::{anyhow, Context, Result};
+use crate::browser_actions::{command_from_browser_tool, dispatch_browser_command, BrowserTarget};
+use anyhow::{anyhow, Result};
 use serde_json::{json, Value};
 
 pub(super) fn tool_definitions() -> Vec<Value> {
@@ -113,13 +112,13 @@ pub(super) fn handle_tool_call(runtime: &mut McpRuntime, request: &Value) -> Val
             arguments.get("share_url").and_then(Value::as_str),
         ),
         _ => runtime.ensure_active_display().and_then(|_| {
-            if let Some(share_url) = runtime.active_share_url() {
-                dispatch_shared_tool(&share_url, name, arguments)
+            let target = if let Some(share_url) = runtime.active_share_url() {
+                BrowserTarget::shared(share_url)
             } else {
-                runtime
-                    .cdp_endpoint()
-                    .and_then(|cdp_endpoint| dispatch_tool(&cdp_endpoint, name, arguments))
-            }
+                BrowserTarget::cdp(runtime.cdp_endpoint()?)
+            };
+            let command = command_from_browser_tool(name, arguments)?;
+            dispatch_browser_command(&target, &command)
         }),
     };
 
@@ -131,58 +130,11 @@ pub(super) fn handle_tool_call(runtime: &mut McpRuntime, request: &Value) -> Val
     }
 }
 
-fn dispatch_tool(cdp_endpoint: &str, name: &str, arguments: &Value) -> Result<String> {
-    let client = CdpClient::new(cdp_endpoint);
-    match name {
-        "browser_navigate" => client.navigate(required_str(arguments, "url")?),
-        "browser_snapshot" => client.snapshot(),
-        "browser_evaluate" => client.evaluate(required_str(arguments, "expression")?),
-        "browser_click" => client.click(required_str(arguments, "selector")?),
-        "browser_type" => client.type_text(
-            required_str(arguments, "selector")?,
-            required_str(arguments, "text")?,
-        ),
-        "browser_press_key" => client.press_key(required_str(arguments, "key")?),
-        "browser_take_screenshot" => {
-            let full_page = arguments
-                .get("full_page")
-                .and_then(Value::as_bool)
-                .unwrap_or(true);
-            client.screenshot(full_page)
-        }
-        "browser_list_tabs" | "browser_activate_tab" => Err(anyhow!(
-            "{name} is only available for shared-extension browsers"
-        )),
-        "" => Err(anyhow!("tools/call params.name is required")),
-        _ => Err(anyhow!("Unknown browser-connection tool: {name}")),
-    }
-}
-
-fn dispatch_shared_tool(share_url: &str, name: &str, arguments: &Value) -> Result<String> {
-    let client = SharedBrowserClient::new(share_url);
-    match name {
-        "browser_navigate" => client.navigate(required_str(arguments, "url")?),
-        "browser_snapshot" => client.snapshot(),
-        "browser_evaluate" => client.evaluate(required_str(arguments, "expression")?),
-        "browser_click" => client.click(required_str(arguments, "selector")?),
-        "browser_type" => client.type_text(
-            required_str(arguments, "selector")?,
-            required_str(arguments, "text")?,
-        ),
-        "browser_press_key" => client.press_key(required_str(arguments, "key")?),
-        "browser_take_screenshot" => {
-            let full_page = arguments
-                .get("full_page")
-                .and_then(Value::as_bool)
-                .unwrap_or(true);
-            client.screenshot(full_page)
-        }
-        "browser_list_tabs" => serde_json::to_string_pretty(&client.list_tabs()?)
-            .context("failed to render shared browser tabs"),
-        "browser_activate_tab" => client.activate_tab(required_i64(arguments, "tab_id")?),
-        "" => Err(anyhow!("tools/call params.name is required")),
-        _ => Err(anyhow!("Unknown browser-connection tool: {name}")),
-    }
+fn tool_result(text: String, is_error: bool) -> Value {
+    json!({
+        "content": [{ "type": "text", "text": text }],
+        "isError": is_error
+    })
 }
 
 fn required_str<'a>(arguments: &'a Value, name: &str) -> Result<&'a str> {
@@ -192,18 +144,4 @@ fn required_str<'a>(arguments: &'a Value, name: &str) -> Result<&'a str> {
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .ok_or_else(|| anyhow!("argument `{name}` is required"))
-}
-
-fn required_i64(arguments: &Value, name: &str) -> Result<i64> {
-    arguments
-        .get(name)
-        .and_then(Value::as_i64)
-        .ok_or_else(|| anyhow!("argument `{name}` is required"))
-}
-
-fn tool_result(text: String, is_error: bool) -> Value {
-    json!({
-        "content": [{ "type": "text", "text": text }],
-        "isError": is_error
-    })
 }
