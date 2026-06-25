@@ -69,7 +69,7 @@ fn rbc_eval_requires_expression_or_file_before_network() {
 
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("eval requires --expression or --file"));
+    assert!(stderr.contains("eval requires JS, --expression, or --file"));
 }
 
 #[test]

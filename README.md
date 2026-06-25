@@ -196,7 +196,7 @@ rbc dg-my-project navigate https://example.com
 rbc dg-my-project click 'button[type="submit"]'
 rbc dg-my-project type 'input[name="q"]' 'search text'
 rbc dg-my-project key Enter
-rbc dg-my-project eval --expression 'document.title'
+rbc dg-my-project eval 'document.title'
 rbc dg-my-project eval --file /tmp/browser-task.js
 rbc dg-my-project screenshot --full-page --output /tmp/page.png
 rbc dg-my-project tabs

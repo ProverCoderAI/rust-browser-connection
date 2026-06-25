@@ -32,7 +32,7 @@ rbc <project> navigate https://example.com
 rbc <project> click 'button[type="submit"]'
 rbc <project> type 'input[name="q"]' 'search text'
 rbc <project> key Enter
-rbc <project> eval --expression 'document.title'
+rbc <project> eval 'document.title'
 rbc <project> eval --file /tmp/browser-task.js
 rbc <project> screenshot --full-page --output /tmp/page.png
 rbc <project> tabs

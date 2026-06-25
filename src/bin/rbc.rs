@@ -63,10 +63,13 @@ enum TopCommand {
     /// Evaluate JavaScript in the current page.
     Eval {
         /// JavaScript expression to evaluate.
-        #[arg(long, conflicts_with = "file")]
+        #[arg(value_name = "JS", conflicts_with_all = ["expression", "file"])]
+        code: Option<String>,
+        /// JavaScript expression to evaluate.
+        #[arg(long, conflicts_with_all = ["code", "file"])]
         expression: Option<String>,
         /// Read JavaScript expression from a file.
-        #[arg(long, value_name = "PATH")]
+        #[arg(long, value_name = "PATH", conflicts_with_all = ["code", "expression"])]
         file: Option<PathBuf>,
     },
     /// Click an element by CSS selector.
@@ -99,10 +102,13 @@ enum ToolCommand {
     /// Evaluate JavaScript in the current page.
     Eval {
         /// JavaScript expression to evaluate.
-        #[arg(long, conflicts_with = "file")]
+        #[arg(value_name = "JS", conflicts_with_all = ["expression", "file"])]
+        code: Option<String>,
+        /// JavaScript expression to evaluate.
+        #[arg(long, conflicts_with_all = ["code", "file"])]
         expression: Option<String>,
         /// Read JavaScript expression from a file.
-        #[arg(long, value_name = "PATH")]
+        #[arg(long, value_name = "PATH", conflicts_with_all = ["code", "expression"])]
         file: Option<PathBuf>,
     },
     /// Click an element by CSS selector.
@@ -252,7 +258,12 @@ fn tool_command(command: &TopCommand) -> ToolCommand {
         TopCommand::Tools { command } => command.clone(),
         TopCommand::Navigate { url } => ToolCommand::Navigate { url: url.clone() },
         TopCommand::Snapshot => ToolCommand::Snapshot,
-        TopCommand::Eval { expression, file } => ToolCommand::Eval {
+        TopCommand::Eval {
+            code,
+            expression,
+            file,
+        } => ToolCommand::Eval {
+            code: code.clone(),
             expression: expression.clone(),
             file: file.clone(),
         },
@@ -277,14 +288,24 @@ fn browser_command(command: &ToolCommand) -> Result<BrowserCommand> {
     match command {
         ToolCommand::Navigate { url } => Ok(BrowserCommand::Navigate { url: url.clone() }),
         ToolCommand::Snapshot => Ok(BrowserCommand::Snapshot),
-        ToolCommand::Eval { expression, file } => {
-            let expression = match (expression, file) {
-                (Some(expression), None) => expression.clone(),
-                (None, Some(path)) => fs::read_to_string(path)
+        ToolCommand::Eval {
+            code,
+            expression,
+            file,
+        } => {
+            let expression = match (code, expression, file) {
+                (Some(expression), None, None) | (None, Some(expression), None) => {
+                    expression.clone()
+                }
+                (None, None, Some(path)) => fs::read_to_string(path)
                     .with_context(|| format!("failed to read {}", path.display()))?,
-                (None, None) => return Err(anyhow!("eval requires --expression or --file")),
-                (Some(_), Some(_)) => {
-                    return Err(anyhow!("eval accepts only one of --expression or --file"))
+                (None, None, None) => {
+                    return Err(anyhow!("eval requires JS, --expression, or --file"))
+                }
+                _ => {
+                    return Err(anyhow!(
+                        "eval accepts only one of JS, --expression, or --file"
+                    ))
                 }
             };
             Ok(BrowserCommand::Evaluate { expression })
@@ -507,11 +528,28 @@ mod tests {
         let path = std::env::temp_dir().join(format!("rbc-eval-{}.js", unix_ms()));
         fs::write(&path, "document.title").unwrap();
         let command = browser_command(&ToolCommand::Eval {
+            code: None,
             expression: None,
             file: Some(path.clone()),
         })
         .unwrap();
         let _ = fs::remove_file(path);
+        assert_eq!(
+            command,
+            BrowserCommand::Evaluate {
+                expression: "document.title".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn eval_command_accepts_direct_javascript() {
+        let command = browser_command(&ToolCommand::Eval {
+            code: Some("document.title".to_string()),
+            expression: None,
+            file: None,
+        })
+        .unwrap();
         assert_eq!(
             command,
             BrowserCommand::Evaluate {
