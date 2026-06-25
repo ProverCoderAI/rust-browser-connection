@@ -100,7 +100,8 @@ last selected tab or the active tab in the last focused window.
 - `press_key`: requires `key`; dispatches common keyboard events through CDP.
 - `screenshot`: returns a base64 PNG by default, or JPEG with
   `format: "jpeg"`.
-- `list_tabs`: returns basic tab metadata.
+- `list_tabs`: returns windows with nested tabs plus a flat `tabs` list. Window
+  and tab metadata includes `regular`/`incognito` when Edge exposes it.
 - `activate_tab`: activates `tabId` or the current target tab.
 
 ## Notes and limits
@@ -111,6 +112,9 @@ last selected tab or the active tab in the last focused window.
   remote debugging port.
 - Pages such as `edge://`, extension pages, store pages, and policy-restricted
   tabs may reject debugger, scripting, or screenshot actions.
+- Edge/Chrome extensions cannot read the human profile name. A loaded extension
+  instance represents one browser profile; incognito windows are visible only
+  when the user enables the extension in InPrivate/Incognito mode.
 - The share link should be treated as a bearer credential. Anyone with the link
   can control the shared session until the user clicks `Stop` or the relay
   expires the session.

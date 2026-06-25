@@ -231,6 +231,33 @@ fn tab_inventory(value: Value) -> Value {
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
+    if let Some(windows) = value.get("windows").and_then(Value::as_array) {
+        let windows = windows
+            .iter()
+            .cloned()
+            .map(normalize_window)
+            .collect::<Vec<_>>();
+        let tabs = if tabs.is_empty() {
+            tabs_from_windows(&windows)
+        } else {
+            tabs
+        };
+        let active_tab = focused_active_tab(&windows)
+            .or_else(|| {
+                tabs.iter()
+                    .find(|tab| tab.get("active").and_then(Value::as_bool) == Some(true))
+                    .cloned()
+            })
+            .unwrap_or(Value::Null);
+        return json!({
+            "totalTabs": tabs.len(),
+            "totalWindows": windows.len(),
+            "activeTab": active_tab,
+            "windows": windows,
+            "tabs": tabs,
+        });
+    }
+
     let mut windows = BTreeMap::<i64, Vec<Value>>::new();
     let mut active_tab = Value::Null;
 
@@ -264,6 +291,51 @@ fn tab_inventory(value: Value) -> Value {
         "windows": windows,
         "tabs": tabs,
     })
+}
+
+fn focused_active_tab(windows: &[Value]) -> Option<Value> {
+    windows
+        .iter()
+        .find(|window| window.get("focused").and_then(Value::as_bool) == Some(true))
+        .and_then(|window| {
+            window
+                .get("tabs")
+                .and_then(Value::as_array)
+                .and_then(|tabs| {
+                    tabs.iter()
+                        .find(|tab| tab.get("active").and_then(Value::as_bool) == Some(true))
+                        .cloned()
+                })
+        })
+}
+
+fn tabs_from_windows(windows: &[Value]) -> Vec<Value> {
+    windows
+        .iter()
+        .filter_map(|window| window.get("tabs").and_then(Value::as_array))
+        .flatten()
+        .cloned()
+        .collect()
+}
+
+fn normalize_window(mut window: Value) -> Value {
+    let tab_count = window
+        .get("tabs")
+        .and_then(Value::as_array)
+        .map(Vec::len)
+        .unwrap_or(0);
+    let active = window
+        .get("tabs")
+        .and_then(Value::as_array)
+        .is_some_and(|tabs| {
+            tabs.iter()
+                .any(|tab| tab.get("active").and_then(Value::as_bool) == Some(true))
+        });
+    if let Some(object) = window.as_object_mut() {
+        object.insert("tabCount".to_string(), json!(tab_count));
+        object.insert("active".to_string(), json!(active));
+    }
+    window
 }
 
 fn truncate_text(text: &str, max_chars: usize) -> String {
@@ -311,5 +383,38 @@ mod tests {
         assert_eq!(inventory["totalTabs"], 3);
         assert_eq!(inventory["totalWindows"], 2);
         assert_eq!(inventory["activeTab"]["id"], 1);
+    }
+
+    #[test]
+    fn preserves_window_metadata_from_extension() {
+        let inventory = tab_inventory(json!({
+            "windows": [{
+                "id": 10,
+                "focused": true,
+                "incognito": true,
+                "profile": "incognito",
+                "type": "normal",
+                "tabs": [{"id": 1, "windowId": 10, "active": true}]
+            }],
+            "tabs": [{"id": 1, "windowId": 10, "active": true}]
+        }));
+
+        assert_eq!(inventory["totalWindows"], 1);
+        assert_eq!(inventory["windows"][0]["incognito"], true);
+        assert_eq!(inventory["windows"][0]["profile"], "incognito");
+        assert_eq!(inventory["windows"][0]["tabCount"], 1);
+    }
+
+    #[test]
+    fn active_tab_prefers_focused_window() {
+        let inventory = tab_inventory(json!({
+            "windows": [
+                {"id": 10, "focused": false, "tabs": [{"id": 1, "active": true}]},
+                {"id": 11, "focused": true, "tabs": [{"id": 2, "active": true}]}
+            ]
+        }));
+
+        assert_eq!(inventory["totalTabs"], 2);
+        assert_eq!(inventory["activeTab"]["id"], 2);
     }
 }

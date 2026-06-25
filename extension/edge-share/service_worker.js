@@ -695,8 +695,14 @@ async function commandScreenshot(params) {
 }
 
 async function commandListTabs() {
-  const tabs = await chromeCall(chrome.tabs.query, chrome.tabs, {});
-  return { tabs: tabs.map(tabSummary) };
+  const windows = await chromeCall(chrome.windows.getAll, chrome.windows, {
+    populate: true
+  });
+  const summaries = windows.map(windowSummary);
+  return {
+    windows: summaries,
+    tabs: summaries.flatMap((window) => window.tabs)
+  };
 }
 
 async function commandActivateTab(params) {
@@ -746,11 +752,33 @@ async function currentTabSummary(tabId) {
   return tabSummary(tab);
 }
 
-function tabSummary(tab) {
+function windowSummary(window) {
+  return {
+    id: window.id,
+    focused: window.focused,
+    incognito: window.incognito,
+    profile: window.incognito ? "incognito" : "regular",
+    type: window.type || "",
+    state: window.state || "",
+    top: window.top,
+    left: window.left,
+    width: window.width,
+    height: window.height,
+    tabs: (window.tabs || []).map((tab) => tabSummary(tab, window))
+  };
+}
+
+function tabSummary(tab, window) {
   return {
     id: tab.id,
     windowId: tab.windowId,
     active: tab.active,
+    index: tab.index,
+    incognito: tab.incognito || window?.incognito || false,
+    profile: tab.incognito || window?.incognito ? "incognito" : "regular",
+    pinned: tab.pinned || false,
+    audible: tab.audible || false,
+    discarded: tab.discarded || false,
     title: tab.title || "",
     url: tab.url || "",
     status: tab.status || ""

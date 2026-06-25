@@ -887,10 +887,13 @@ function renderScreenshot(latest, shots) {{
 
 function renderTabs(windows) {{
   const rows = [];
-  for (const win of windows) for (const tab of win.tabs || []) {{
-    const row = el("div", {{ className: "row" }}, (tab.active ? "Active: " : "") + (tab.title || "(untitled)") + "\\n" + (tab.url || ""));
-    row.appendChild(el("button", {{ className: "tab-button", onclick: () => activateTab(tab.id) }}, "Activate"));
-    rows.push(row);
+  for (const win of windows) {{
+    rows.push(el("div", {{ className: "row" }}, "Window " + (win.windowId ?? win.id ?? "-") + " " + (win.profile || (win.incognito ? "incognito" : "regular")) + " " + (win.focused ? "focused " : "") + (win.type || "") + " " + (win.state || "") + "\\n" + (win.tabCount || 0) + " tabs"));
+    for (const tab of win.tabs || []) {{
+      const row = el("div", {{ className: "row" }}, (tab.active ? "Active: " : "") + (tab.profile || "") + " " + (tab.title || "(untitled)") + "\\n" + (tab.url || ""));
+      row.appendChild(el("button", {{ className: "tab-button", onclick: () => activateTab(tab.id) }}, "Activate"));
+      rows.push(row);
+    }}
   }}
   document.getElementById("tabsList").replaceChildren(...rows);
 }}
