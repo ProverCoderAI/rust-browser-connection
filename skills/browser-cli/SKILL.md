@@ -1,6 +1,6 @@
 ---
 name: browser-cli
-description: Use rbc CLI commands to inspect and automate browser sessions without MCP. Trigger this skill when Codex needs browser automation, page inspection, clicking, typing, tab/window control, screenshots, or multi-step JavaScript browser scripts while minimizing MCP token overhead.
+description: Use rbc CLI commands to inspect and automate browser sessions without MCP, including Playwright-over-CDP scripts. Trigger this skill when Codex needs browser automation, page inspection, clicking, typing, tab/window control, screenshots, Playwright page APIs, or multi-step JavaScript browser scripts while minimizing MCP token overhead.
 ---
 
 # Browser CLI
@@ -34,6 +34,8 @@ rbc <project> type 'input[name="q"]' 'search text'
 rbc <project> key Enter
 rbc <project> eval 'document.title'
 rbc <project> eval --file /tmp/browser-task.js
+rbc <project> pw --code 'return await page.title()'
+rbc <project> pw /tmp/playwright-task.js
 rbc <project> screenshot --full-page --output /tmp/page.png
 rbc <project> tabs
 rbc <project> activate-tab 123
@@ -59,9 +61,28 @@ Run it:
 rbc "$DOCKER_GIT_PROJECT_ID" --json --trace-dir .browser-trace eval --file /tmp/browser-task.js
 ```
 
+## Playwright Pattern
+
+Use `pw` when the target has CDP and Playwright locators/actions are more ergonomic:
+
+```js
+await page.goto('https://example.com');
+await page.getByRole('link', { name: /more/i }).click();
+return { title: await page.title(), url: page.url() };
+```
+
+Run it:
+
+```bash
+rbc "$DOCKER_GIT_PROJECT_ID" --json --trace-dir .browser-trace pw /tmp/playwright-task.js
+```
+
+`pw` exposes `playwright`, `browser`, `context`, `page`, and `pages` in scope. It requires a CDP-backed Chromium/Edge target. Extension-only share links cannot run arbitrary Playwright; use `eval`, `click`, `type`, `screenshot`, `tabs`, and `activate-tab` there.
+
 ## Rules
 
 - Do not expose full shared browser URLs in logs or final answers; they contain bearer tokens.
 - Do not use `tabs` or `activate-tab` against direct CDP targets; those are shared-extension only.
+- Do not use `pw` against extension-only share links unless a CDP URL is also available.
 - If a command fails because no control panel is running, retry with explicit `--share-url` or `--cdp-url`.
 - Keep command output compact; use screenshots only when visual state matters.

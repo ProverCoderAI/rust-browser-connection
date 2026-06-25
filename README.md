@@ -198,6 +198,8 @@ rbc dg-my-project type 'input[name="q"]' 'search text'
 rbc dg-my-project key Enter
 rbc dg-my-project eval 'document.title'
 rbc dg-my-project eval --file /tmp/browser-task.js
+rbc dg-my-project pw --code 'return await page.title()'
+rbc dg-my-project pw /tmp/playwright-task.js
 rbc dg-my-project screenshot --full-page --output /tmp/page.png
 rbc dg-my-project tabs
 rbc dg-my-project activate-tab 123
@@ -213,6 +215,16 @@ rbc dg-my-project --cdp-url http://127.0.0.1:9223 snapshot
 Add `--json` for machine-readable output and `--trace-dir .browser-trace` to append
 `rbc.jsonl` audit events. `rbc dg-my-project tools snapshot` is also accepted when a caller wants an
 explicit `tools` namespace.
+
+`rbc pw` runs real Playwright code through `chromium.connectOverCDP`, so it requires a CDP-backed
+Chromium/Edge target. Extension-only share links do not expose CDP; use `rbc eval/click/type` for
+those, or expose a remote-debugging endpoint and pass `--cdp-url`.
+
+```js
+// /tmp/playwright-task.js
+await page.goto("https://example.com");
+return { title: await page.title(), url: page.url() };
+```
 
 ## MCP tools
 

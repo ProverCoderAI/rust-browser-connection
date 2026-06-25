@@ -15,6 +15,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
+mod playwright;
+
 #[derive(Debug, Parser)]
 #[command(
     name = "rbc",
@@ -91,6 +93,18 @@ enum TopCommand {
     Tabs,
     /// Activate a tab by browser tab id.
     ActivateTab { tab_id: i64 },
+    /// Run Playwright JavaScript against a CDP-backed browser.
+    Pw {
+        /// JavaScript file body to run with playwright/browser/context/page in scope.
+        #[arg(value_name = "SCRIPT", conflicts_with = "code")]
+        script: Option<PathBuf>,
+        /// JavaScript body to run with playwright/browser/context/page in scope.
+        #[arg(long, value_name = "JS", conflicts_with = "script")]
+        code: Option<String>,
+        /// Allow the script to close the shared browser/context.
+        #[arg(long)]
+        allow_close: bool,
+    },
 }
 
 #[derive(Debug, Clone, Subcommand)]
@@ -142,7 +156,15 @@ fn main() {
 
 fn run() -> Result<()> {
     let cli = Cli::parse();
-    let target = resolve_target(&cli)?;
+    if matches!(cli.command, TopCommand::Pw { .. }) {
+        return run_playwright_cli(&cli);
+    }
+
+    run_tool_cli(&cli)
+}
+
+fn run_tool_cli(cli: &Cli) -> Result<()> {
+    let target = resolve_target(cli)?;
     let tool = tool_command(&cli.command);
     let command = browser_command(&tool)?;
     let started = Instant::now();
@@ -151,19 +173,46 @@ fn run() -> Result<()> {
 
     match result {
         Ok(text) => {
-            let output = command_output(&command, &text, &cli)?;
+            let output = command_output(&command, &text, cli)?;
             write_trace(
-                &cli,
+                cli,
                 &target,
                 &command,
                 duration_ms,
                 Ok(&output.trace_result),
             )?;
-            print_output(&cli, &target, &command, &output)?;
+            print_output(cli, &target, &command, &output)?;
             Ok(())
         }
         Err(error) => {
-            write_trace(&cli, &target, &command, duration_ms, Err(&error))?;
+            write_trace(cli, &target, &command, duration_ms, Err(&error))?;
+            Err(error)
+        }
+    }
+}
+
+fn run_playwright_cli(cli: &Cli) -> Result<()> {
+    let (script, allow_close) = playwright_input(&cli.command)?;
+    let target = BrowserTarget::cdp(resolve_cdp_endpoint(cli)?);
+    let started = Instant::now();
+    let result = playwright::run_playwright_script(&target, &script, allow_close);
+    let duration_ms = started.elapsed().as_millis() as u64;
+
+    match result {
+        Ok(output) => {
+            let json_result = playwright::parse_playwright_result(&output);
+            write_trace_event(
+                cli,
+                &target,
+                "browser_playwright",
+                duration_ms,
+                Ok(&json_result),
+            )?;
+            print_event_output(cli, &target, "browser_playwright", &output, &json_result)?;
+            Ok(())
+        }
+        Err(error) => {
+            write_trace_event(cli, &target, "browser_playwright", duration_ms, Err(&error))?;
             Err(error)
         }
     }
@@ -198,6 +247,31 @@ fn resolve_target(cli: &Cli) -> Result<BrowserTarget> {
         Err(_) => Ok(BrowserTarget::cdp(render_cdp_url_for_ports(
             compute_browser_ports(project),
         ))),
+    }
+}
+
+fn resolve_cdp_endpoint(cli: &Cli) -> Result<String> {
+    if let Some(url) = cli.cdp_url.as_ref() {
+        return Ok(url.clone());
+    }
+    if cli.share_url.is_some() {
+        return Err(anyhow!(
+            "real Playwright requires a CDP endpoint; use rbc eval/click/type for extension-only shared browsers or pass --cdp-url"
+        ));
+    }
+
+    let project = cli.project.trim();
+    if project.is_empty() {
+        return Err(anyhow!("PROJECT must not be empty"));
+    }
+    let port = cli
+        .control_port
+        .unwrap_or_else(|| compute_browser_control_panel_port(project));
+    match load_control_panel_inventory(port) {
+        Ok(inventory) => cdp_endpoint_from_inventory(&inventory).with_context(|| {
+            format!("control panel on port {port} did not expose an active CDP browser")
+        }),
+        Err(_) => Ok(render_cdp_url_for_ports(compute_browser_ports(project))),
     }
 }
 
@@ -253,6 +327,44 @@ fn target_from_inventory(inventory: &Value) -> Result<BrowserTarget> {
     ))
 }
 
+fn cdp_endpoint_from_inventory(inventory: &Value) -> Result<String> {
+    let browser = active_browser_from_inventory(inventory)?;
+    if let Some(endpoint) = browser
+        .get("cdpEndpoint")
+        .and_then(Value::as_str)
+        .filter(|url| !url.trim().is_empty())
+    {
+        return Ok(endpoint.to_string());
+    }
+    let active = browser
+        .get("name")
+        .and_then(Value::as_str)
+        .unwrap_or("active browser");
+    Err(anyhow!(
+        "`{active}` is not CDP-backed; real Playwright requires CDP. Use rbc eval/click/type or expose remote debugging and pass --cdp-url"
+    ))
+}
+
+fn active_browser_from_inventory(inventory: &Value) -> Result<&Value> {
+    let active = inventory
+        .get("active")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("inventory did not include active browser"))?;
+    let browsers = inventory
+        .get("browsers")
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow!("inventory did not include browsers"))?;
+    browsers
+        .iter()
+        .find(|browser| browser.get("active").and_then(Value::as_bool) == Some(true))
+        .or_else(|| {
+            browsers
+                .iter()
+                .find(|browser| browser.get("name").and_then(Value::as_str) == Some(active))
+        })
+        .ok_or_else(|| anyhow!("active browser `{active}` was not found in inventory"))
+}
+
 fn tool_command(command: &TopCommand) -> ToolCommand {
     match command {
         TopCommand::Tools { command } => command.clone(),
@@ -281,6 +393,7 @@ fn tool_command(command: &TopCommand) -> ToolCommand {
         },
         TopCommand::Tabs => ToolCommand::Tabs,
         TopCommand::ActivateTab { tab_id } => ToolCommand::ActivateTab { tab_id: *tab_id },
+        TopCommand::Pw { .. } => unreachable!("Playwright command is handled before tool dispatch"),
     }
 }
 
@@ -379,6 +492,32 @@ fn print_output(
     Ok(())
 }
 
+fn print_event_output(
+    cli: &Cli,
+    target: &BrowserTarget,
+    tool: &str,
+    text: &str,
+    result: &Value,
+) -> Result<()> {
+    if cli.json_output {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json!({
+                "ok": true,
+                "tool": tool,
+                "target": {
+                    "kind": target.kind(),
+                    "label": target.safe_label()
+                },
+                "result": result
+            }))?
+        );
+    } else if !text.is_empty() {
+        println!("{text}");
+    }
+    Ok(())
+}
+
 fn write_trace(
     cli: &Cli,
     target: &BrowserTarget,
@@ -416,6 +555,64 @@ fn write_trace(
     };
     writeln!(file, "{}", serde_json::to_string(&event)?)
         .with_context(|| format!("failed to write {}", path.display()))
+}
+
+fn write_trace_event(
+    cli: &Cli,
+    target: &BrowserTarget,
+    tool: &str,
+    duration_ms: u64,
+    result: Result<&Value, &anyhow::Error>,
+) -> Result<()> {
+    let Some(dir) = cli.trace_dir.as_ref() else {
+        return Ok(());
+    };
+    fs::create_dir_all(dir).with_context(|| format!("failed to create {}", dir.display()))?;
+    let path = dir.join("rbc.jsonl");
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .with_context(|| format!("failed to open {}", path.display()))?;
+    let event = match result {
+        Ok(value) => json!({
+            "at": unix_ms(),
+            "tool": tool,
+            "target": { "kind": target.kind(), "label": target.safe_label() },
+            "durationMs": duration_ms,
+            "ok": true,
+            "result": value
+        }),
+        Err(error) => json!({
+            "at": unix_ms(),
+            "tool": tool,
+            "target": { "kind": target.kind(), "label": target.safe_label() },
+            "durationMs": duration_ms,
+            "ok": false,
+            "error": error.to_string()
+        }),
+    };
+    writeln!(file, "{}", serde_json::to_string(&event)?)
+        .with_context(|| format!("failed to write {}", path.display()))
+}
+
+fn playwright_input(command: &TopCommand) -> Result<(String, bool)> {
+    let TopCommand::Pw {
+        script,
+        code,
+        allow_close,
+    } = command
+    else {
+        return Err(anyhow!("internal error: expected pw command"));
+    };
+    let source = match (script, code) {
+        (Some(path), None) => fs::read_to_string(path)
+            .with_context(|| format!("failed to read {}", path.display()))?,
+        (None, Some(code)) => code.clone(),
+        (None, None) => return Err(anyhow!("pw requires SCRIPT or --code")),
+        (Some(_), Some(_)) => return Err(anyhow!("pw accepts only one of SCRIPT or --code")),
+    };
+    Ok((source, *allow_close))
 }
 
 struct WrittenScreenshot {
@@ -581,5 +778,22 @@ mod tests {
         });
         let target = target_from_inventory(&inventory).unwrap();
         assert!(matches!(target, BrowserTarget::Shared { .. }));
+    }
+
+    #[test]
+    fn playwright_resolution_prefers_cdp_from_inventory() {
+        let inventory = json!({
+            "active": "edge",
+            "browsers": [{
+                "name": "edge",
+                "active": true,
+                "shareUrl": "https://relay.example/share/s#agent=a",
+                "cdpEndpoint": "http://127.0.0.1:9222"
+            }]
+        });
+        assert_eq!(
+            cdp_endpoint_from_inventory(&inventory).unwrap(),
+            "http://127.0.0.1:9222"
+        );
     }
 }
