@@ -1,4 +1,4 @@
-use std::io::Write;
+use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc;
@@ -69,6 +69,31 @@ fn retry_browser_connect(url: &str) -> WebSocket<MaybeTlsStream<std::net::TcpStr
 fn stop_child(mut child: Child) {
     let _ = child.kill();
     let _ = child.wait();
+}
+
+fn spawn_inventory_server(inventory: Value) -> (String, thread::JoinHandle<()>) {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind inventory server");
+    let url = format!(
+        "http://{}",
+        listener.local_addr().expect("inventory server addr")
+    );
+    let handle = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept inventory request");
+        let mut request = [0; 2048];
+        let bytes = stream.read(&mut request).expect("read inventory request");
+        let request = String::from_utf8_lossy(&request[..bytes]);
+        assert!(request.starts_with("GET /api/browsers "));
+        let body = inventory.to_string();
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        stream
+            .write_all(response.as_bytes())
+            .expect("write inventory response");
+    });
+    (url, handle)
 }
 
 #[test]
@@ -227,13 +252,11 @@ fn rbc_navigates_shared_browser_through_relay_link_without_mcp() {
 
     let share_url = format!("http://127.0.0.1:{relay_port}/share/{session}#agent={agent_token}");
     let output = Command::new(env!("CARGO_BIN_EXE_rbc"))
-        .args([
-            "--share-url",
-            &share_url,
-            "dg-shared-browser-test",
-            "navigate",
-            "https://example.com/",
-        ])
+        .env(
+            "BROWSER_CONNECTION_BROWSER_SHARES",
+            format!("edge={share_url}"),
+        )
+        .args(["edge", "navigate", "https://example.com/"])
         .output()
         .expect("run rbc");
 
@@ -305,12 +328,26 @@ fn rbc_runs_playwright_subset_through_shared_browser_link() {
         .expect("browser websocket connects to relay");
 
     let share_url = format!("http://127.0.0.1:{relay_port}/share/{session}#agent={agent_token}");
+    let (control_url, control_thread) = spawn_inventory_server(json!({
+        "active": "managed",
+        "browsers": [
+            {
+                "name": "managed",
+                "active": true,
+                "cdpEndpoint": "http://127.0.0.1:9223"
+            },
+            {
+                "name": "edge",
+                "active": false,
+                "shareUrl": share_url
+            }
+        ]
+    }));
     let output = Command::new(env!("CARGO_BIN_EXE_rbc"))
+        .env("BROWSER_CONNECTION_CONTROL_URL", &control_url)
         .args([
-            "--share-url",
-            &share_url,
             "--json",
-            "dg-shared-browser-test",
+            "edge",
             "pw",
             "--code",
             "await page.goto('https://example.com/'); return { title: await page.title() };",
@@ -319,6 +356,7 @@ fn rbc_runs_playwright_subset_through_shared_browser_link() {
         .expect("run rbc pw");
 
     stop_child(relay);
+    control_thread.join().expect("inventory server exits");
     browser_thread.join().expect("browser thread exits");
 
     assert!(

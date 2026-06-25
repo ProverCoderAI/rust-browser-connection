@@ -58,6 +58,8 @@ fn rbc_help_exposes_browser_actions_without_mcp() {
     assert!(stdout.contains("navigate"));
     assert!(stdout.contains("--share-url"));
     assert!(stdout.contains("--cdp-url"));
+    assert!(stdout.contains("--control-url"));
+    assert!(stdout.contains("Browser name"));
     assert!(!stdout.contains("--project"));
 }
 

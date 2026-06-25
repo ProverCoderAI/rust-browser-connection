@@ -104,7 +104,7 @@ last selected tab or the active tab in the last focused window.
   and tab metadata includes `regular`/`incognito` when Edge exposes it.
 - `activate_tab`: activates `tabId` or the current target tab.
 
-`rbc <project> pw` can run a Playwright-compatible subset against share links by
+`rbc <browser> pw` can run a Playwright-compatible subset against share links by
 translating supported `page` methods into these relay commands. Unsupported
 Playwright APIs return a clear error instead of silently pretending to work.
 

@@ -187,34 +187,41 @@ mcp_servers:
 ## CLI browser automation
 
 Use `rbc` when an agent should drive the browser with normal commands instead of MCP tool
-calls. It can target a shared Edge extension link, a direct CDP endpoint, or the active browser from
-the local `browser-connection` control panel.
+calls. It can target a browser by name from the configured browser pool, a shared Edge extension
+link, a direct CDP endpoint, or the active browser from the `browser-connection` control panel. A
+platform can set `BROWSER_CONNECTION_CONTROL_URL` so agents can use browser names without knowing
+the underlying share link.
 
 ```bash
-rbc dg-my-project snapshot
-rbc dg-my-project navigate https://example.com
-rbc dg-my-project click 'button[type="submit"]'
-rbc dg-my-project type 'input[name="q"]' 'search text'
-rbc dg-my-project key Enter
-rbc dg-my-project eval 'document.title'
-rbc dg-my-project eval --file /tmp/browser-task.js
-rbc dg-my-project pw --code 'return await page.title()'
-rbc dg-my-project pw /tmp/playwright-task.js
-rbc dg-my-project screenshot --full-page --output /tmp/page.png
-rbc dg-my-project tabs
-rbc dg-my-project activate-tab 123
+rbc edge snapshot
+rbc edge navigate https://example.com
+rbc edge click 'button[type="submit"]'
+rbc edge type 'input[name="q"]' 'search text'
+rbc edge key Enter
+rbc edge eval 'document.title'
+rbc edge eval --file /tmp/browser-task.js
+rbc edge pw --code 'return await page.title()'
+rbc edge pw /tmp/playwright-task.js
+rbc edge screenshot --full-page --output /tmp/page.png
+rbc edge tabs
+rbc edge activate-tab 123
+rbc chromium snapshot
+rbc active pw --code 'return await page.title()'
 ```
 
 Direct targets bypass the control panel:
 
 ```bash
-rbc dg-my-project --share-url "$EDGE_SHARE_URL" snapshot
-rbc dg-my-project --cdp-url http://127.0.0.1:9223 snapshot
+rbc edge --share-url "$EDGE_SHARE_URL" snapshot
+rbc chromium --cdp-url http://127.0.0.1:9223 snapshot
+rbc edge --control-url https://executive-fri-sea-lets.trycloudflare.com snapshot
 ```
 
 Add `--json` for machine-readable output and `--trace-dir .browser-trace` to append
-`rbc.jsonl` audit events. `rbc dg-my-project tools snapshot` is also accepted when a caller wants an
-explicit `tools` namespace.
+`rbc.jsonl` audit events. `rbc <browser> tools snapshot` is also accepted when a caller wants an
+explicit `tools` namespace. If no matching browser is found in the configured pool, the first
+argument is treated as the legacy docker-git project id and `rbc` falls back to that project's local
+CDP/control-panel ports.
 
 `rbc pw` uses real Playwright through `chromium.connectOverCDP` for CDP-backed Chromium/Edge
 targets. For Edge extension share links it runs a Playwright-compatible subset over the relay. The

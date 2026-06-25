@@ -5,17 +5,14 @@ use clap::{Parser, Subcommand};
 use docker_git_browser_connection::browser_actions::{
     command_result_json, dispatch_browser_command, BrowserCommand, BrowserTarget,
 };
-use docker_git_browser_connection::{
-    compute_browser_control_panel_port, compute_browser_ports, render_cdp_url_for_ports,
-};
 use serde_json::{json, Value};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 mod playwright;
+mod target_resolution;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -32,9 +29,13 @@ struct Cli {
     #[arg(long, global = true, conflicts_with = "share_url")]
     cdp_url: Option<String>,
 
-    /// Control panel port. Defaults to the deterministic port for PROJECT.
+    /// Control panel port. Defaults to the deterministic port for TARGET when used as a project id.
     #[arg(long, global = true)]
     control_port: Option<u16>,
+
+    /// Browser control panel URL. Defaults to BROWSER_CONNECTION_CONTROL_URL, then local project panel.
+    #[arg(long, global = true, value_name = "URL")]
+    control_url: Option<String>,
 
     /// Emit machine-readable JSON.
     #[arg(long = "json", global = true)]
@@ -44,8 +45,8 @@ struct Cli {
     #[arg(long, global = true, value_name = "DIR")]
     trace_dir: Option<PathBuf>,
 
-    /// docker-git/browser-connection project id for control-panel discovery.
-    project: String,
+    /// Browser name from the configured pool, or a legacy docker-git project id.
+    target: String,
 
     #[command(subcommand)]
     command: TopCommand,
@@ -53,7 +54,7 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum TopCommand {
-    /// Optional explicit namespace for tool commands: rbc PROJECT tools snapshot.
+    /// Optional explicit namespace for tool commands: rbc TARGET tools snapshot.
     Tools {
         #[command(subcommand)]
         command: ToolCommand,
@@ -226,80 +227,13 @@ struct CommandOutput {
 }
 
 fn resolve_target(cli: &Cli) -> Result<BrowserTarget> {
-    if let Some(url) = cli.share_url.as_ref() {
-        return Ok(BrowserTarget::shared(url));
-    }
-    if let Some(url) = cli.cdp_url.as_ref() {
-        return Ok(BrowserTarget::cdp(url));
-    }
-
-    let project = cli.project.trim();
-    if project.is_empty() {
-        return Err(anyhow!("PROJECT must not be empty"));
-    }
-    let port = cli
-        .control_port
-        .unwrap_or_else(|| compute_browser_control_panel_port(project));
-    match load_control_panel_inventory(port) {
-        Ok(inventory) => target_from_inventory(&inventory).with_context(|| {
-            format!("control panel on port {port} did not expose an active browser")
-        }),
-        Err(_) => Ok(BrowserTarget::cdp(render_cdp_url_for_ports(
-            compute_browser_ports(project),
-        ))),
-    }
-}
-
-fn load_control_panel_inventory(port: u16) -> Result<Value> {
-    let url = format!("http://127.0.0.1:{port}/api/browsers");
-    let output = Command::new("curl")
-        .args(["-fsS", &url])
-        .output()
-        .with_context(|| format!("failed to run curl for {url}"))?;
-    if !output.status.success() {
-        return Err(anyhow!(
-            "control panel request failed with status {}",
-            output.status
-        ));
-    }
-    serde_json::from_slice(&output.stdout).context("control panel inventory was not JSON")
-}
-
-fn target_from_inventory(inventory: &Value) -> Result<BrowserTarget> {
-    let active = inventory
-        .get("active")
-        .and_then(Value::as_str)
-        .ok_or_else(|| anyhow!("inventory did not include active browser"))?;
-    let browsers = inventory
-        .get("browsers")
-        .and_then(Value::as_array)
-        .ok_or_else(|| anyhow!("inventory did not include browsers"))?;
-    let browser = browsers
-        .iter()
-        .find(|browser| browser.get("active").and_then(Value::as_bool) == Some(true))
-        .or_else(|| {
-            browsers
-                .iter()
-                .find(|browser| browser.get("name").and_then(Value::as_str) == Some(active))
-        })
-        .ok_or_else(|| anyhow!("active browser `{active}` was not found in inventory"))?;
-    if let Some(share_url) = browser
-        .get("shareUrl")
-        .and_then(Value::as_str)
-        .filter(|url| !url.trim().is_empty())
-    {
-        return Ok(BrowserTarget::shared(share_url));
-    }
-    if let Some(endpoint) = browser
-        .get("cdpEndpoint")
-        .and_then(Value::as_str)
-        .filter(|url| !url.trim().is_empty())
-    {
-        return Ok(BrowserTarget::cdp(endpoint));
-    }
-    Err(anyhow!(
-        "active browser `{active}` has neither shareUrl nor cdpEndpoint"
-    ))
+    target_resolution::resolve_target(target_resolution::ResolveOptions {
+        share_url: cli.share_url.as_deref(),
+        cdp_url: cli.cdp_url.as_deref(),
+        control_port: cli.control_port,
+        control_url: cli.control_url.as_deref(),
+        target: &cli.target,
+    })
 }
 
 fn tool_command(command: &TopCommand) -> ToolCommand {
@@ -700,20 +634,5 @@ mod tests {
         assert_eq!(written.bytes, 1);
         assert_eq!(fs::read(&path).unwrap(), b"M");
         let _ = fs::remove_file(path);
-    }
-
-    #[test]
-    fn chooses_share_target_before_cdp_from_inventory() {
-        let inventory = json!({
-            "active": "edge",
-            "browsers": [{
-                "name": "edge",
-                "active": true,
-                "shareUrl": "https://relay.example/share/s#agent=a",
-                "cdpEndpoint": "http://127.0.0.1:1"
-            }]
-        });
-        let target = target_from_inventory(&inventory).unwrap();
-        assert!(matches!(target, BrowserTarget::Shared { .. }));
     }
 }
