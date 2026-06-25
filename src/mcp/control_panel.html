@@ -1,0 +1,1501 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>browser-connection</title>
+<style>
+:root {
+  color-scheme: light dark;
+  --bg: #f4f6f8;
+  --surface: #ffffff;
+  --surface-muted: #eef2f6;
+  --surface-raised: #ffffff;
+  --text: #17202a;
+  --muted: #64748b;
+  --line: #d7dee8;
+  --accent: #137c72;
+  --accent-strong: #0f625b;
+  --accent-soft: #dff7f1;
+  --blue: #2563eb;
+  --blue-soft: #e7efff;
+  --ok: #16825d;
+  --ok-soft: #ddf5e9;
+  --warn: #a65f00;
+  --warn-soft: #fff1d6;
+  --danger: #c2413a;
+  --danger-soft: #fee7e5;
+  --shadow: 0 18px 38px rgba(23, 32, 42, 0.08);
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0f141a;
+    --surface: #161d25;
+    --surface-muted: #202a35;
+    --surface-raised: #1b2430;
+    --text: #eef3f8;
+    --muted: #9ba9b8;
+    --line: #2c3947;
+    --accent: #62d8c5;
+    --accent-strong: #8ce7d9;
+    --accent-soft: #153a35;
+    --blue: #7aa7ff;
+    --blue-soft: #172a4e;
+    --ok: #78d8a8;
+    --ok-soft: #173b2b;
+    --warn: #ffc56d;
+    --warn-soft: #3b2a12;
+    --danger: #ff938c;
+    --danger-soft: #3d1f20;
+    --shadow: 0 18px 38px rgba(0, 0, 0, 0.28);
+  }
+}
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+html { height: 100%; overflow: hidden; }
+body {
+  margin: 0;
+  height: 100%;
+  overflow: hidden;
+  background: var(--bg);
+  color: var(--text);
+  font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+button, input, select { font: inherit; }
+button {
+  min-height: 36px;
+  border: 1px solid var(--accent);
+  border-radius: 6px;
+  background: var(--accent);
+  color: #ffffff;
+  cursor: pointer;
+  font-weight: 700;
+}
+button:hover { background: var(--accent-strong); border-color: var(--accent-strong); }
+button:disabled, .is-disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+select, input {
+  width: 100%;
+  min-height: 38px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text);
+  padding: 0 10px;
+}
+input::placeholder { color: color-mix(in srgb, var(--muted) 72%, transparent); }
+label {
+  display: block;
+  margin-bottom: 7px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0;
+  text-transform: uppercase;
+}
+.shell {
+  display: grid;
+  grid-template-columns: 320px minmax(0, 1fr);
+  height: 100vh;
+  min-height: 0;
+  overflow: hidden;
+}
+.sidebar {
+  min-width: 0;
+  height: 100vh;
+  border-right: 1px solid var(--line);
+  background: var(--surface);
+  padding: 14px;
+  overflow: auto;
+}
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 14px;
+}
+.brand-mark {
+  display: grid;
+  place-items: center;
+  width: 38px;
+  height: 38px;
+  border-radius: 8px;
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+  font-weight: 900;
+}
+.brand-title { font-size: 18px; font-weight: 800; }
+.brand-subtitle { color: var(--muted); font-size: 12px; margin-top: 2px; overflow-wrap: anywhere; }
+.side-section {
+  border-top: 1px solid var(--line);
+  padding-top: 12px;
+  margin-top: 12px;
+}
+.select-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 78px;
+  gap: 8px;
+}
+.secondary-button {
+  background: var(--surface-muted);
+  border-color: var(--line);
+  color: var(--text);
+}
+.secondary-button:hover {
+  background: color-mix(in srgb, var(--surface-muted) 76%, var(--accent-soft));
+  border-color: var(--line);
+}
+.connect-status {
+  margin-top: 8px;
+  min-height: 30px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+.share-grid { display: grid; gap: 8px; }
+.meta-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+.meta-item {
+  min-width: 0;
+  padding: 9px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface-muted);
+}
+.meta-item strong {
+  display: block;
+  margin-bottom: 4px;
+  font-size: 12px;
+}
+.meta-item span {
+  display: block;
+  color: var(--muted);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+  max-height: 34px;
+  overflow: hidden;
+}
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  max-width: 100%;
+  min-height: 26px;
+  padding: 4px 9px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface-muted);
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+  white-space: nowrap;
+}
+.badge::before {
+  content: "";
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  background: currentColor;
+}
+.badge-ok { background: var(--ok-soft); color: var(--ok); border-color: color-mix(in srgb, var(--ok) 28%, var(--line)); }
+.badge-warn { background: var(--warn-soft); color: var(--warn); border-color: color-mix(in srgb, var(--warn) 28%, var(--line)); }
+.badge-danger { background: var(--danger-soft); color: var(--danger); border-color: color-mix(in srgb, var(--danger) 28%, var(--line)); }
+.badge-info { background: var(--blue-soft); color: var(--blue); border-color: color-mix(in srgb, var(--blue) 28%, var(--line)); }
+.main {
+  min-width: 0;
+  height: 100vh;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.main-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  min-height: 70px;
+  padding: 10px 18px;
+  border-bottom: 1px solid var(--line);
+  background: var(--surface);
+  flex: 0 0 auto;
+}
+.eyebrow {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0;
+  text-transform: uppercase;
+}
+.target-title {
+  margin: 4px 0 2px;
+  font-size: 19px;
+  line-height: 1.2;
+}
+.target-subtitle {
+  color: var(--muted);
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+.toolbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+.link-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 36px;
+  padding: 0 12px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface-muted);
+  color: var(--text);
+  text-decoration: none;
+  font-weight: 800;
+}
+.frame {
+  flex: 1;
+  min-height: 0;
+  border: 0;
+  background: #05080c;
+}
+.empty {
+  flex: 1;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+}
+.empty-card {
+  width: min(520px, 100%);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  padding: 20px;
+  box-shadow: var(--shadow);
+}
+.empty-card h2 { margin: 0 0 8px; font-size: 20px; }
+.empty-card p { margin: 0; color: var(--muted); line-height: 1.5; }
+.activity {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  padding: 12px;
+  display: grid;
+  grid-template-rows: auto auto minmax(0, 1fr);
+}
+.shared-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  padding: 10px 12px;
+}
+.shared-banner strong { display: block; font-size: 15px; }
+.shared-banner span { display: block; color: var(--muted); font-size: 13px; margin-top: 3px; overflow-wrap: anywhere; }
+.stats {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+  margin-bottom: 10px;
+}
+.stat {
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 8px 10px;
+  background: var(--surface);
+}
+.stat strong {
+  display: block;
+  margin-top: 4px;
+  font-size: 18px;
+  line-height: 1.1;
+  overflow-wrap: anywhere;
+}
+.activity-grid {
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(260px, 0.68fr) minmax(400px, 1.08fr) minmax(420px, 1.18fr);
+  grid-template-rows: minmax(0, 1fr);
+  gap: 12px;
+  align-items: stretch;
+}
+.activity-panel {
+  min-width: 0;
+  min-height: 0;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+.screenshot-panel { grid-column: 1; }
+.log-panel { grid-column: 2; }
+.tabs-panel { grid-column: 3; }
+.panel-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--line);
+  flex: 0 0 auto;
+}
+.panel-head h2 {
+  margin: 0;
+  font-size: 15px;
+}
+.panel-note {
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.panel-body {
+  min-height: 0;
+  flex: 1;
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+}
+.panel-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+.small-button {
+  width: auto;
+  min-height: 30px;
+  padding: 0 10px;
+  font-size: 12px;
+}
+.screenshot-stage {
+  display: grid;
+  place-items: center;
+  flex: 1;
+  min-height: 0;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #05080c;
+  overflow: hidden;
+}
+#latestScreenshot {
+  width: 100%;
+  height: 100%;
+  max-height: none;
+  object-fit: contain;
+  background: #05080c;
+}
+.empty-list {
+  color: var(--muted);
+  font-size: 13px;
+  padding: 12px;
+  border: 1px dashed var(--line);
+  border-radius: 6px;
+  background: var(--surface-muted);
+}
+.thumbs {
+  flex: 0 0 auto;
+  display: flex;
+  gap: 8px;
+  overflow-x: auto;
+  margin-top: 8px;
+  padding-bottom: 2px;
+  max-height: 58px;
+}
+.thumb-button {
+  flex: 0 0 auto;
+  width: 86px;
+  height: 54px;
+  min-height: 54px;
+  margin: 0;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface-muted);
+  overflow: hidden;
+}
+.thumb-button:hover { border-color: var(--accent); background: var(--surface-muted); }
+.thumb-button img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+.tab-controls {
+  flex: 0 0 auto;
+  display: grid;
+  grid-template-columns: minmax(220px, 1fr) auto;
+  gap: 10px;
+  padding: 9px 12px;
+  border-bottom: 1px solid var(--line);
+  background: var(--surface-muted);
+}
+.tab-search { background: var(--surface); }
+.tabs-list {
+  min-height: 0;
+  flex: 1;
+  overflow: auto;
+  padding: 4px 12px 12px;
+}
+.window-group {
+  margin-top: 8px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-raised);
+  overflow: hidden;
+}
+.window-head {
+  width: 100%;
+  min-height: 38px;
+  margin: 0;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border: 0;
+  border-bottom: 1px solid var(--line);
+  border-radius: 0;
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+}
+.window-head:hover { background: var(--surface-muted); color: var(--text); }
+.window-caret {
+  color: var(--muted);
+  font-weight: 900;
+}
+.window-title { font-weight: 800; overflow-wrap: anywhere; }
+.window-meta {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+.window-collapsed .window-head { border-bottom: 0; }
+.window-body[hidden] { display: none !important; }
+.tab-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: center;
+  padding: 8px 10px;
+  border-top: 1px solid var(--line);
+}
+.tab-row:first-child { border-top: 0; }
+.tab-active {
+  box-shadow: inset 4px 0 0 var(--accent);
+  background: color-mix(in srgb, var(--accent-soft) 52%, transparent);
+}
+.tab-title {
+  font-weight: 750;
+  line-height: 1.3;
+  overflow-wrap: anywhere;
+}
+.tab-url {
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+.tab-meta {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-top: 7px;
+}
+.tag {
+  display: inline-flex;
+  align-items: center;
+  min-height: 20px;
+  padding: 2px 7px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 800;
+  background: var(--surface-muted);
+}
+.event-log {
+  min-height: 0;
+  flex: 1;
+  overflow: auto;
+  padding: 8px 12px 12px;
+}
+.recorder-panel {
+  flex: 0 0 auto;
+  display: grid;
+  gap: 8px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--line);
+  background: var(--surface-muted);
+}
+.recorder-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+.recorder-top strong { font-size: 13px; }
+.recorder-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.recorded-script {
+  min-height: 90px;
+  max-height: 140px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #05080c;
+  color: #d9e6f2;
+  padding: 8px;
+  font: 11px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  resize: vertical;
+}
+.recorded-actions {
+  max-height: 96px;
+  overflow: auto;
+  display: grid;
+  gap: 6px;
+}
+.recorded-action {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 8px;
+  align-items: center;
+  font-size: 12px;
+}
+.recorded-action strong { color: var(--text); }
+.recorded-action span {
+  min-width: 0;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.event-row {
+  display: grid;
+  gap: 8px;
+  margin-bottom: 10px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-raised);
+}
+.event-head {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+}
+.event-tool {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 800;
+  overflow-wrap: anywhere;
+}
+.event-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 12px;
+  white-space: nowrap;
+}
+.event-index {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 999px;
+  background: var(--surface-muted);
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 900;
+}
+.event-summary {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+.event-target {
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+.event-details {
+  border-top: 1px solid var(--line);
+  padding-top: 8px;
+}
+.event-details summary {
+  cursor: pointer;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+}
+.event-details pre {
+  max-height: 180px;
+  margin: 8px 0 0;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #05080c;
+  color: #d9e6f2;
+  padding: 8px;
+  font-size: 11px;
+  line-height: 1.4;
+  white-space: pre-wrap;
+}
+.event-toolbar {
+  flex: 0 0 auto;
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  align-items: center;
+  padding: 9px 12px;
+  border-bottom: 1px solid var(--line);
+  background: var(--surface-muted);
+}
+.event-search {
+  flex: 1 1 190px;
+  min-height: 30px;
+  background: var(--surface);
+}
+.filter-button {
+  width: auto;
+  min-height: 28px;
+  padding: 0 10px;
+  border-color: var(--line);
+  background: var(--surface);
+  color: var(--muted);
+  font-size: 12px;
+}
+.filter-button:hover,
+.filter-button.is-active {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+}
+.event-shot-button {
+  width: auto;
+  min-height: 28px;
+  padding: 0 10px;
+  border-color: var(--line);
+  background: var(--surface-muted);
+  color: var(--text);
+  font-size: 12px;
+}
+.event-shot-button:hover {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+}
+.event-ok .event-tool { color: var(--ok); }
+.event-error .event-tool { color: var(--danger); }
+.event-screenshot .event-index { background: var(--blue-soft); color: var(--blue); }
+.event-error .event-index { background: var(--danger-soft); color: var(--danger); }
+.error { color: var(--danger); }
+@media (max-width: 980px) {
+  html, body { overflow: auto; }
+  .shell { grid-template-columns: 1fr; height: auto; overflow: visible; }
+  .sidebar { height: auto; overflow: visible; border-right: 0; border-bottom: 1px solid var(--line); }
+  .main { height: auto; min-height: 70vh; overflow: visible; }
+  .activity { overflow: visible; display: block; }
+  .activity-grid, .stats { grid-template-columns: 1fr; }
+  .screenshot-panel, .tabs-panel, .log-panel { grid-column: auto; }
+  .activity-panel { margin-bottom: 12px; }
+  .tabs-list, .event-log { max-height: 50vh; }
+  .screenshot-stage { min-height: 240px; }
+}
+@media (max-width: 620px) {
+  .main-header, .shared-banner, .panel-head, .tab-controls {
+    display: grid;
+    grid-template-columns: 1fr;
+  }
+  .select-row { grid-template-columns: 1fr; }
+  .toolbar-actions, .panel-actions { justify-content: stretch; }
+  .link-button, .panel-actions button { width: 100%; }
+  .tab-row { grid-template-columns: 1fr; }
+}
+</style>
+</head>
+<body>
+<div class="shell">
+  <aside class="sidebar">
+    <div class="brand">
+      <div class="brand-mark">BC</div>
+      <div>
+        <div class="brand-title">browser-connection</div>
+        <div class="brand-subtitle" id="workspaceName">workspace</div>
+      </div>
+    </div>
+
+    <span id="connectionBadge" class="badge badge-warn">Loading</span>
+
+    <div class="side-section">
+      <label for="browserSelect">Browser target</label>
+      <div class="select-row">
+        <select id="browserSelect"></select>
+        <button id="selectButton" class="secondary-button" type="button">Use</button>
+      </div>
+    </div>
+
+    <div class="side-section">
+      <button id="connectEdgeButton" type="button">Connect Edge</button>
+      <div id="connectStatus" class="connect-status">Checking Edge extension</div>
+    </div>
+
+    <div class="side-section share-grid">
+      <label for="shareName">Shared browser link</label>
+      <input id="shareName" value="edge" autocomplete="off" spellcheck="false">
+      <input id="shareUrl" placeholder="Paste browser share link" autocomplete="off" spellcheck="false">
+      <button id="shareButton" type="button">Add shared browser</button>
+    </div>
+
+    <div class="side-section meta-grid">
+      <div class="meta-item"><strong>Active browser</strong><span id="activeName">-</span></div>
+      <div class="meta-item"><strong>Mode</strong><span id="activeKind">-</span></div>
+      <div class="meta-item"><strong>CDP endpoint</strong><span id="cdpEndpoint">-</span></div>
+      <div class="meta-item"><strong>noVNC URL</strong><span id="novncUrl">-</span></div>
+    </div>
+  </aside>
+
+  <main class="main">
+    <header class="main-header">
+      <div>
+        <div class="eyebrow">Current target</div>
+        <h1 id="targetTitle" class="target-title">Waiting for browser</h1>
+        <div id="targetSubtitle" class="target-subtitle">-</div>
+      </div>
+      <div class="toolbar-actions">
+        <a id="openNovnc" class="link-button" href="#" target="_blank" rel="noreferrer">Open noVNC</a>
+      </div>
+    </header>
+
+    <iframe id="novncFrame" class="frame" title="noVNC"></iframe>
+
+    <div id="emptyState" class="empty" hidden>
+      <div class="empty-card">
+        <h2 id="emptyTitle">No browser display</h2>
+        <p id="emptyMessage">Select a browser target to see its display or activity.</p>
+      </div>
+    </div>
+
+    <section id="activityPanel" class="activity" hidden>
+      <div class="shared-banner">
+        <div>
+          <strong>Shared browser session</strong>
+          <span id="sharedSummary">Waiting for tab inventory.</span>
+        </div>
+        <span class="badge badge-ok">Relay connected</span>
+      </div>
+
+      <div class="stats">
+        <div class="stat"><label>Mode</label><strong id="activityMode">-</strong></div>
+        <div class="stat"><label>Windows</label><strong id="windowCount">0</strong></div>
+        <div class="stat"><label>Tabs</label><strong id="tabCount">0</strong></div>
+        <div class="stat"><label>Events</label><strong id="eventCount">0</strong></div>
+      </div>
+
+      <div class="activity-grid">
+        <section class="activity-panel screenshot-panel">
+          <div class="panel-head">
+            <div>
+              <h2>Latest screenshot</h2>
+              <p class="panel-note" id="screenshotMeta">No screenshots captured yet.</p>
+            </div>
+          </div>
+          <div class="panel-body">
+            <div class="screenshot-stage">
+              <img id="latestScreenshot" alt="" hidden>
+              <div id="screenshotEmpty" class="empty-list">No screenshot available.</div>
+            </div>
+            <div id="screenshotThumbs" class="thumbs"></div>
+          </div>
+        </section>
+
+        <section class="activity-panel log-panel">
+          <div class="panel-head">
+            <div>
+              <h2>Agent timeline</h2>
+              <p class="panel-note">Every browser command, result, error, and screenshot.</p>
+            </div>
+          </div>
+          <div class="recorder-panel">
+            <div class="recorder-top">
+              <strong>User action recorder</strong>
+              <span id="recordingBadge" class="tag">idle 0</span>
+            </div>
+            <p class="panel-note">Start recording here or in the extension. A floating recorder stays visible on supported Edge pages.</p>
+            <div class="recorder-controls">
+              <button id="startRecordingButton" class="small-button" type="button">Record</button>
+              <button id="stopRecordingButton" class="secondary-button small-button" type="button">Stop</button>
+              <button id="clearRecordingButton" class="secondary-button small-button" type="button">Clear</button>
+              <button id="copyRecordingButton" class="secondary-button small-button" type="button">Copy script</button>
+            </div>
+            <textarea id="recordedScript" class="recorded-script" readonly spellcheck="false" placeholder="Records actions from all http/https Edge tabs where the extension is active."></textarea>
+            <div id="recordedActions" class="recorded-actions"></div>
+          </div>
+          <div class="event-toolbar" aria-label="Filter agent actions">
+            <button class="filter-button is-active" data-event-filter="all" data-label="All" type="button">All</button>
+            <button class="filter-button" data-event-filter="failed" data-label="Failed" type="button">Failed</button>
+            <button class="filter-button" data-event-filter="screenshots" data-label="Screenshots" type="button">Screenshots</button>
+            <input id="eventSearch" class="event-search" placeholder="Search actions" autocomplete="off" spellcheck="false">
+          </div>
+          <div id="eventLog" class="event-log"></div>
+        </section>
+
+        <section class="activity-panel tabs-panel">
+          <div class="panel-head">
+            <div>
+              <h2>Windows and tabs</h2>
+              <p id="activeTab" class="panel-note">-</p>
+            </div>
+            <div class="panel-actions">
+              <button id="expandAllButton" class="secondary-button small-button" type="button">Expand</button>
+              <button id="collapseAllButton" class="secondary-button small-button" type="button">Collapse</button>
+            </div>
+          </div>
+          <div class="tab-controls">
+            <input id="tabSearch" class="tab-search" placeholder="Filter tabs by title or URL" autocomplete="off" spellcheck="false">
+            <div id="tabsError" class="error" hidden></div>
+          </div>
+          <div id="tabsList" class="tabs-list"></div>
+        </section>
+      </div>
+    </section>
+  </main>
+</div>
+
+<script>
+const personalName = "__PERSONAL_BROWSER_NAME__";
+const projectId = "__PROJECT_ID__";
+const controlToken = "__CONTROL_TOKEN__";
+const edgeBrowserName = "edge";
+let lastActive = "";
+let autoConnectStarted = false;
+let activityVisible = false;
+let collapsedWindows = loadCollapsedWindows();
+let lastWindows = [];
+let lastEvents = [];
+let latestScreenshots = [];
+let tabFilter = "";
+let eventFilter = "all";
+let eventSearch = "";
+let latestInventory = null;
+let latestRecording = null;
+
+document.getElementById("workspaceName").textContent = projectId;
+
+async function loadInventory() {
+  const response = await fetch("/api/browsers", { cache: "no-store" });
+  if (!response.ok) throw new Error(await response.text());
+  const inventory = await response.json();
+  renderInventory(inventory);
+}
+
+function renderInventory(inventory) {
+  latestInventory = inventory;
+  const select = document.getElementById("browserSelect");
+  const previous = select.value;
+  select.replaceChildren();
+  for (const browser of inventory.browsers || []) {
+    const option = document.createElement("option");
+    option.value = browser.name;
+    option.textContent = browserLabel(browser);
+    if (browser.active) option.selected = true;
+    select.appendChild(option);
+  }
+  if (previous && [...select.options].some(option => option.value === previous)) {
+    select.value = previous;
+  }
+
+  const active = (inventory.browsers || []).find(browser => browser.active) || null;
+  const activeName = inventory.active || "-";
+  const kind = active?.kind || "-";
+  text("activeName", activeName);
+  text("activeKind", kind);
+  text("cdpEndpoint", active?.cdpEndpoint || "-");
+  text("novncUrl", active?.novncUrl || "-");
+
+  const shared = active?.kind === "shared-extension";
+  setBadge("connectionBadge", active ? (shared ? "Shared Edge" : "Connected") : "No target", active ? (shared ? "info" : "ok") : "warn");
+  text("targetTitle", active ? browserLabel(active) : "Waiting for browser");
+  text("targetSubtitle", active ? targetSubtitle(active) : "Select a browser target in the sidebar.");
+  setFrame(active?.novncUrl || "", shared);
+}
+
+function browserLabel(browser) {
+  const name = browser?.name || "-";
+  if (name === personalName) return "personal";
+  if (browser?.kind === "shared-extension") return name + " shared Edge";
+  return name;
+}
+
+function targetSubtitle(browser) {
+  if (browser.kind === "shared-extension") {
+    return "Extension relay target. Screen is not streamed, actions and screenshots are logged here.";
+  }
+  if (browser.novncUrl) return "noVNC display target with live screen.";
+  if (browser.cdpEndpoint) return "CDP target without noVNC display.";
+  return "Target is registered but has no display endpoint.";
+}
+
+function setFrame(url, showActivity) {
+  const frame = document.getElementById("novncFrame");
+  const empty = document.getElementById("emptyState");
+  const activity = document.getElementById("activityPanel");
+  const link = document.getElementById("openNovnc");
+  link.href = url || "#";
+  link.classList.toggle("is-disabled", !url);
+  link.style.pointerEvents = url ? "auto" : "none";
+  activityVisible = !url && showActivity;
+  activity.hidden = !activityVisible;
+  if (!url) {
+    frame.hidden = true;
+    empty.hidden = activityVisible;
+    frame.removeAttribute("src");
+    lastActive = "";
+    if (!activityVisible) {
+      text("emptyTitle", "No live display");
+      text("emptyMessage", "The active target has no noVNC URL. Shared Edge activity appears here when the Edge extension is connected.");
+    }
+    return;
+  }
+  empty.hidden = true;
+  frame.hidden = false;
+  if (url !== lastActive) {
+    frame.src = url;
+    lastActive = url;
+  }
+}
+
+async function selectBrowser() {
+  const select = document.getElementById("browserSelect");
+  const name = select.value;
+  if (!name) return;
+  const response = await apiFetch("/api/select?name=" + encodeURIComponent(name), { method: "POST" });
+  if (!response.ok) throw new Error(await response.text());
+  await loadInventory();
+}
+
+async function connectEdge(auto) {
+  if (!window.browserConnection || typeof window.browserConnection.request !== "function") {
+    setConnectStatus("Edge Share extension is not available on this page.");
+    return;
+  }
+
+  setConnectStatus(auto ? "Requesting Edge connection" : "Opening Edge connection request");
+  const result = await window.browserConnection.request({
+    method: "connect",
+    params: {
+      protocolVersion: 1,
+      relayUrl: window.location.origin,
+      workspaceId: projectId,
+      poolId: "current-runtime",
+      browserName: edgeBrowserName,
+      displayName: "Edge"
+    }
+  });
+  if (!result || !result.shareUrl) {
+    throw new Error("Edge extension did not return a share URL");
+  }
+  await registerShare(edgeBrowserName, result.shareUrl);
+  setConnectStatus("Connected as edge.");
+}
+
+async function registerShare(name, shareUrl) {
+  const body = new URLSearchParams({ name, share_url: shareUrl });
+  const response = await apiFetch("/api/share", {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body
+  });
+  if (!response.ok) throw new Error(await response.text());
+  await loadInventory();
+}
+
+function maybeAutoConnectEdge() {
+  if (autoConnectStarted) return;
+  autoConnectStarted = true;
+  if (!window.browserConnection || typeof window.browserConnection.request !== "function") {
+    setConnectStatus("Install or enable Edge Share extension to connect this Edge.");
+    return;
+  }
+  const key = "browserConnectionAutoConnect:" + window.location.origin + window.location.pathname;
+  if (sessionStorage.getItem(key) === "1" && edgeIsRegistered()) {
+    setConnectStatus("Edge Share extension detected.");
+    return;
+  }
+  sessionStorage.setItem(key, "1");
+  connectEdge(true).catch(error => setConnectStatus(error.message || String(error)));
+}
+
+function edgeIsRegistered() {
+  return (latestInventory?.browsers || []).some(browser => browser.name === edgeBrowserName && browser.kind === "shared-extension");
+}
+
+async function loadActivity() {
+  if (!activityVisible) return;
+  const response = await apiFetch("/api/activity?refresh=1", { cache: "no-store" });
+  if (!response.ok) throw new Error(await response.text());
+  renderActivity(await response.json());
+}
+
+async function loadRecording() {
+  if (!activityVisible) return;
+  const response = await apiFetch("/api/recording", { cache: "no-store" });
+  if (!response.ok) {
+    renderRecording({ error: await response.text(), actions: [], script: "", count: 0 });
+    return;
+  }
+  renderRecording(await response.json());
+}
+
+function renderActivity(activity) {
+  const tabs = activity.tabs || {};
+  const events = activity.events || [];
+  const shots = activity.screenshots || [];
+  lastWindows = tabs.windows || [];
+  lastEvents = events;
+  latestScreenshots = shots;
+  text("activityMode", activity.mode || "-");
+  text("windowCount", tabs.totalWindows || 0);
+  text("tabCount", tabs.totalTabs || 0);
+  text("eventCount", events.length);
+  const active = tabs.activeTab || null;
+  text("activeTab", active ? "Agent target: " + (active.title || "(untitled)") + " | " + (active.url || "") : "Agent target: no active tab selected.");
+  text("sharedSummary", active ? (active.title || "(untitled)") + " | " + hostLabel(active.url) : "Tab inventory is available when the extension relay responds.");
+  const err = document.getElementById("tabsError");
+  err.hidden = !activity.tabsError;
+  err.textContent = activity.tabsError || "";
+  renderScreenshot(activity.latestScreenshot, shots);
+  renderTabs(lastWindows);
+  renderEvents(events);
+}
+
+function renderScreenshot(latest, shots) {
+  const image = document.getElementById("latestScreenshot");
+  const empty = document.getElementById("screenshotEmpty");
+  const meta = document.getElementById("screenshotMeta");
+  image.hidden = !latest?.dataUrl;
+  empty.hidden = !!latest?.dataUrl;
+  if (latest?.dataUrl) {
+    image.src = latest.dataUrl;
+    text("screenshotMeta", formatTime(latest.at) + " from " + (latest.browser || "browser") + " via " + (latest.tool || "tool"));
+  } else {
+    text("screenshotMeta", "No screenshots captured yet.");
+  }
+  const thumbs = document.getElementById("screenshotThumbs");
+  thumbs.replaceChildren(...shots.slice(0, 10).filter(s => s.dataUrl).map(s => {
+    const button = el("button", { className: "thumb-button", title: formatTime(s.at), onclick: () => {
+      image.hidden = false;
+      empty.hidden = true;
+      image.src = s.dataUrl;
+      meta.textContent = formatTime(s.at) + " from " + (s.browser || "browser") + " via " + (s.tool || "tool");
+    }});
+    button.appendChild(el("img", { src: s.dataUrl, alt: "" }));
+    return button;
+  }));
+}
+
+function renderTabs(windows) {
+  const groups = [];
+  const filter = tabFilter.trim().toLowerCase();
+  for (const win of windows) {
+    const windowId = String(win.windowId ?? win.id ?? "-");
+    const visibleTabs = (win.tabs || []).filter(tab => matchesTab(tab, filter));
+    if (filter && visibleTabs.length === 0) continue;
+    const collapsed = collapsedWindows.has(windowId);
+    const group = el("section", { className: "window-group" + (collapsed ? " window-collapsed" : "") });
+    const head = el("button", {
+      className: "window-head",
+      type: "button",
+      onclick: () => toggleWindow(windowId),
+      "aria-expanded": String(!collapsed)
+    });
+    head.appendChild(el("span", { className: "window-caret" }, collapsed ? ">" : "v"));
+    head.appendChild(el("span", { className: "window-title" }, "Window " + windowId));
+    head.appendChild(el("span", { className: "window-meta" }, windowMeta(win, visibleTabs.length)));
+    group.appendChild(head);
+    const bodyWrap = el("div", { className: "window-body" });
+    bodyWrap.hidden = collapsed;
+    for (const tab of visibleTabs) {
+      const row = el("div", { className: "tab-row" + (tab.active ? " tab-active" : "") });
+      const body = el("div");
+      body.appendChild(el("div", { className: "tab-title" }, (tab.active ? "Active: " : "") + (tab.title || "(untitled)")));
+      body.appendChild(el("div", { className: "tab-url" }, tab.url || ""));
+      const meta = el("div", { className: "tab-meta" });
+      meta.appendChild(el("span", { className: "tag" }, tab.status || "unknown"));
+      if (tab.profile) meta.appendChild(el("span", { className: "tag" }, tab.profile));
+      if (tab.incognito) meta.appendChild(el("span", { className: "tag" }, "incognito"));
+      body.appendChild(meta);
+      row.appendChild(body);
+      row.appendChild(el("button", { className: "small-button", type: "button", onclick: () => activateTab(Number(tab.id)) }, "Activate"));
+      bodyWrap.appendChild(row);
+    }
+    group.appendChild(bodyWrap);
+    groups.push(group);
+  }
+  const tabsList = document.getElementById("tabsList");
+  tabsList.replaceChildren(...(groups.length ? groups : [el("div", { className: "empty-list" }, filter ? "No tabs match this filter." : "No tabs reported by the browser.")]));
+}
+
+function matchesTab(tab, filter) {
+  if (!filter) return true;
+  return String(tab.title || "").toLowerCase().includes(filter) || String(tab.url || "").toLowerCase().includes(filter);
+}
+
+function windowMeta(win, visibleCount) {
+  const kind = win.profile || (win.incognito ? "incognito" : "regular");
+  const state = [kind, win.focused ? "focused" : "", win.type || "", win.state || ""].filter(Boolean).join(" ");
+  return state + " | " + visibleCount + " of " + (win.tabCount || 0) + " tabs";
+}
+
+function toggleWindow(windowId) {
+  collapsedWindows.has(windowId) ? collapsedWindows.delete(windowId) : collapsedWindows.add(windowId);
+  saveCollapsedWindows();
+  renderTabs(lastWindows);
+}
+
+function collapseAllWindows() {
+  collapsedWindows = new Set(lastWindows.map(win => String(win.windowId ?? win.id ?? "-")));
+  saveCollapsedWindows();
+  renderTabs(lastWindows);
+}
+
+function expandAllWindows() {
+  collapsedWindows = new Set();
+  saveCollapsedWindows();
+  renderTabs(lastWindows);
+}
+
+function saveCollapsedWindows() {
+  localStorage.setItem("browserConnectionCollapsedWindows", JSON.stringify([...collapsedWindows]));
+}
+
+function loadCollapsedWindows() {
+  try { return new Set(JSON.parse(localStorage.getItem("browserConnectionCollapsedWindows") || "[]")); }
+  catch (_error) { return new Set(); }
+}
+
+function renderEvents(events) {
+  const log = document.getElementById("eventLog");
+  updateEventFilterButtons(events);
+  const visibleEvents = events.filter(eventMatchesFilter).filter(eventMatchesSearch);
+  if (!events.length) {
+    log.replaceChildren(el("div", { className: "empty-list" }, "No agent actions recorded yet."));
+    return;
+  }
+  if (!visibleEvents.length) {
+    log.replaceChildren(el("div", { className: "empty-list" }, "No actions match this filter."));
+    return;
+  }
+  log.replaceChildren(...visibleEvents.slice(0, 80).map(renderEventRow));
+}
+
+function renderRecording(recording) {
+  latestRecording = recording || {};
+  const actions = latestRecording.actions || [];
+  const badge = document.getElementById("recordingBadge");
+  badge.textContent = latestRecording.recording ? "recording " + actions.length : "idle " + actions.length;
+  badge.className = "tag" + (latestRecording.recording ? " badge-ok" : "");
+  document.getElementById("recordedScript").value = latestRecording.script || "";
+  document.getElementById("stopRecordingButton").disabled = !latestRecording.recording;
+  document.getElementById("clearRecordingButton").disabled = !latestRecording.recording && actions.length === 0;
+  document.getElementById("copyRecordingButton").disabled = !(latestRecording.script || "").trim();
+
+  const list = document.getElementById("recordedActions");
+  if (latestRecording.error) {
+    list.replaceChildren(el("div", { className: "empty-list" }, "Recorder is not available for the active target."));
+    return;
+  }
+  if (!actions.length) {
+    list.replaceChildren(el("div", { className: "empty-list" }, "Press Record, then use any http/https tab in this Edge profile."));
+    return;
+  }
+  list.replaceChildren(...actions.slice(-12).reverse().map(action => {
+    const row = el("div", { className: "recorded-action" });
+    row.appendChild(el("strong", {}, action.kind || "action"));
+    row.appendChild(el("span", { title: recordedActionText(action) }, recordedActionText(action)));
+    return row;
+  }));
+}
+
+function recordedActionText(action) {
+  if (action.selector) return action.selector;
+  if (action.url) return action.url;
+  if (action.key) return action.key;
+  return action.title || "-";
+}
+
+async function setRecording(action) {
+  const response = await apiFetch("/api/recording/" + action, { method: "POST" });
+  if (!response.ok) throw new Error(await response.text());
+  renderRecording(await response.json());
+}
+
+function eventMatchesFilter(event) {
+  if (eventFilter === "failed") return !event.ok;
+  if (eventFilter === "screenshots") return isScreenshotEvent(event);
+  return true;
+}
+
+function eventMatchesSearch(event) {
+  const query = eventSearch.trim().toLowerCase();
+  if (!query) return true;
+  return JSON.stringify({
+    tool: event.tool,
+    arguments: event.arguments || {},
+    result: event.result || {},
+    error: event.error || "",
+  }).toLowerCase().includes(query);
+}
+
+function renderEventRow(event, index) {
+  const classes = ["event-row", event.ok ? "event-ok" : "event-error"];
+  if (isScreenshotEvent(event)) classes.push("event-screenshot");
+  const row = el("article", { className: classes.join(" ") });
+  const head = el("div", { className: "event-head" });
+  const tool = el("div", { className: "event-tool" });
+  tool.appendChild(el("span", { className: "event-index", title: "Action #" + (event.id ?? index + 1) }, "#" + String(event.id ?? index + 1)));
+  tool.appendChild(el("span", {}, eventLabel(event.tool)));
+  const meta = el("div", { className: "event-meta" });
+  meta.appendChild(el("span", { className: "tag" }, event.ok ? "ok" : "error"));
+  meta.appendChild(el("span", { title: formatDateTime(event.at) }, formatTime(event.at)));
+  meta.appendChild(el("span", {}, String(event.durationMs ?? 0) + "ms"));
+  head.appendChild(tool);
+  head.appendChild(meta);
+  row.appendChild(head);
+  row.appendChild(el("div", { className: "event-target" }, eventTarget(event)));
+  row.appendChild(el("div", { className: "event-summary" }, eventSummary(event)));
+
+  if (event.screenshotId) {
+    row.appendChild(el("button", {
+      className: "event-shot-button",
+      type: "button",
+      onclick: () => showScreenshotForEvent(event.screenshotId)
+    }, "Show screenshot"));
+  }
+  row.appendChild(eventDetails(event));
+  return row;
+}
+
+function eventLabel(tool) {
+  const labels = {
+    browser_navigate: "Navigate",
+    browser_click: "Click",
+    browser_type: "Type text",
+    browser_press_key: "Press key",
+    browser_evaluate: "Run JavaScript",
+    browser_snapshot: "Read page",
+    browser_take_screenshot: "Screenshot",
+    browser_list_tabs: "List tabs",
+    browser_activate_tab: "Activate tab",
+    browser_wait_for: "Wait",
+    browser_playwright: "Playwright"
+  };
+  return labels[tool] || String(tool || "browser action").replace(/^browser_/, "").replaceAll("_", " ");
+}
+
+function eventTarget(event) {
+  const args = event.arguments || {};
+  const result = event.result || {};
+  const tab = result.tab || {};
+  const title = result.title || tab.title || "";
+  const url = result.url || tab.url || args.url || "";
+  if (event.tool === "browser_activate_tab" && args.tab_id) return "Tab #" + args.tab_id;
+  if (args.selector) return "Selector: " + args.selector;
+  if (args.key) return "Key: " + args.key;
+  if (url && title) return title + " | " + url;
+  if (url) return url;
+  if (title) return title;
+  return event.browser ? String(event.browser) + " | " + (event.mode || "browser") : "Active browser";
+}
+
+function eventSummary(event) {
+  if (event.error) return String(event.error).slice(0, 320);
+  const args = event.arguments || {};
+  if (event.tool === "browser_navigate" && args.url) return "Opened " + args.url;
+  if (event.tool === "browser_click" && args.selector) return "Clicked " + args.selector;
+  if (event.tool === "browser_type" && args.selector) return "Typed " + String(args.text || "").length + " chars into " + args.selector;
+  if (event.tool === "browser_press_key" && args.key) return "Pressed " + args.key;
+  if (event.tool === "browser_evaluate") return "Executed JavaScript on the active tab.";
+  if (event.tool === "browser_activate_tab" && args.tab_id) return "Activated tab #" + args.tab_id;
+  const result = event.result || {};
+  if (result.kind === "screenshot") return "Screenshot captured and stored in the screenshot panel.";
+  const primary = result.url || result.title || result.text || result.kind || "";
+  const tab = result.tab || {};
+  const tabText = tab.title || tab.url ? "\n" + [tab.title, tab.url].filter(Boolean).join(" | ") : "";
+  return (String(primary || "completed") + tabText).slice(0, 420);
+}
+
+function eventDetails(event) {
+  const details = el("details", { className: "event-details" });
+  details.appendChild(el("summary", {}, "Details"));
+  const payload = {
+    tool: event.tool,
+    browser: event.browser,
+    mode: event.mode,
+    arguments: event.arguments || {},
+    result: event.result || null,
+    error: event.error || null,
+  };
+  details.appendChild(el("pre", {}, JSON.stringify(payload, null, 2).slice(0, 5000)));
+  return details;
+}
+
+function isScreenshotEvent(event) {
+  return !!event.screenshotId || event.result?.kind === "screenshot";
+}
+
+function showScreenshotForEvent(screenshotId) {
+  const shot = latestScreenshots.find(item => String(item.id) === String(screenshotId) || String(item.eventId) === String(screenshotId));
+  if (!shot?.dataUrl) return;
+  const image = document.getElementById("latestScreenshot");
+  document.getElementById("screenshotEmpty").hidden = true;
+  image.hidden = false;
+  image.src = shot.dataUrl;
+  text("screenshotMeta", formatTime(shot.at) + " from " + (shot.browser || "browser") + " via " + (shot.tool || "tool"));
+}
+
+function setEventFilter(filter) {
+  eventFilter = filter;
+  renderEvents(lastEvents);
+}
+
+function updateEventFilterButtons(events = lastEvents) {
+  const counts = {
+    all: events.length,
+    failed: events.filter(event => !event.ok).length,
+    screenshots: events.filter(isScreenshotEvent).length,
+  };
+  for (const button of document.querySelectorAll("[data-event-filter]")) {
+    const filter = button.dataset.eventFilter || "all";
+    button.classList.toggle("is-active", filter === eventFilter);
+    button.textContent = (button.dataset.label || filter) + " " + (counts[filter] ?? 0);
+  }
+}
+
+async function activateTab(tabId) {
+  if (!Number.isInteger(tabId)) return;
+  await apiFetch("/api/activate-tab?tab_id=" + encodeURIComponent(tabId), { method: "POST" });
+  await loadActivity();
+}
+
+function setBadge(id, label, kind) {
+  const node = document.getElementById(id);
+  node.className = "badge badge-" + kind;
+  node.textContent = label;
+}
+
+function hostLabel(url) {
+  try { return new URL(url).host; }
+  catch (_error) { return url || "-"; }
+}
+
+function formatTime(value) {
+  if (!value) return "-";
+  return new Date(value).toLocaleTimeString();
+}
+
+function formatDateTime(value) {
+  if (!value) return "-";
+  return new Date(value).toLocaleString();
+}
+
+function text(id, value) { document.getElementById(id).textContent = value; }
+function el(tag, props = {}, body = "") {
+  const node = document.createElement(tag);
+  Object.assign(node, props);
+  if (body) node.textContent = body;
+  return node;
+}
+
+function setConnectStatus(message) {
+  document.getElementById("connectStatus").textContent = message;
+}
+
+function apiFetch(url, options = {}) {
+  const headers = new Headers(options.headers || {});
+  headers.set("X-Browser-Control-Token", controlToken);
+  return fetch(url, { ...options, headers });
+}
+
+document.getElementById("selectButton").addEventListener("click", () => {
+  selectBrowser().catch(error => console.error(error));
+});
+document.getElementById("browserSelect").addEventListener("change", () => {
+  selectBrowser().catch(error => console.error(error));
+});
+document.getElementById("connectEdgeButton").addEventListener("click", () => {
+  sessionStorage.removeItem("browserConnectionAutoConnect:" + window.location.origin + window.location.pathname);
+  connectEdge(false).catch(error => setConnectStatus(error.message || String(error)));
+});
+document.getElementById("shareButton").addEventListener("click", async () => {
+  const name = document.getElementById("shareName").value.trim() || "edge";
+  const shareUrl = document.getElementById("shareUrl").value.trim();
+  if (!shareUrl) return;
+  await registerShare(name, shareUrl);
+});
+document.getElementById("tabSearch").addEventListener("input", event => {
+  tabFilter = event.target.value;
+  renderTabs(lastWindows);
+});
+document.getElementById("eventSearch").addEventListener("input", event => {
+  eventSearch = event.target.value;
+  renderEvents(lastEvents);
+});
+document.getElementById("expandAllButton").addEventListener("click", expandAllWindows);
+document.getElementById("collapseAllButton").addEventListener("click", collapseAllWindows);
+document.getElementById("startRecordingButton").addEventListener("click", () => {
+  setRecording("start").catch(error => console.error(error));
+});
+document.getElementById("stopRecordingButton").addEventListener("click", () => {
+  setRecording("stop").catch(error => console.error(error));
+});
+document.getElementById("clearRecordingButton").addEventListener("click", () => {
+  setRecording("clear").catch(error => console.error(error));
+});
+document.getElementById("copyRecordingButton").addEventListener("click", async () => {
+  const script = document.getElementById("recordedScript").value.trim();
+  if (script) await navigator.clipboard.writeText(script);
+});
+for (const button of document.querySelectorAll("[data-event-filter]")) {
+  button.addEventListener("click", () => setEventFilter(button.dataset.eventFilter || "all"));
+}
+window.addEventListener("browserConnection#initialized", maybeAutoConnectEdge);
+setTimeout(maybeAutoConnectEdge, 300);
+loadInventory().catch(error => console.error(error));
+setInterval(() => loadInventory().catch(error => console.error(error)), 1000);
+setInterval(() => loadActivity().catch(error => console.error(error)), 1000);
+setInterval(() => loadRecording().catch(error => console.error(error)), 1000);
+</script>
+</body>
+</html>

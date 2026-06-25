@@ -213,6 +213,22 @@ impl SharedBrowserClient {
         self.call_text("activate_tab", json!({ "tabId": tab_id }))
     }
 
+    pub fn recording_state(&self) -> Result<Value> {
+        self.call("recording_state", json!({}))
+    }
+
+    pub fn start_recording(&self) -> Result<Value> {
+        self.call("start_recording", json!({}))
+    }
+
+    pub fn stop_recording(&self) -> Result<Value> {
+        self.call("stop_recording", json!({}))
+    }
+
+    pub fn clear_recording(&self) -> Result<Value> {
+        self.call("clear_recording", json!({}))
+    }
+
     pub fn call_command(&self, command: &str, params: Value) -> Result<Value> {
         self.call(command, params)
     }

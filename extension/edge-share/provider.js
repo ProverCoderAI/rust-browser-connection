@@ -7,6 +7,7 @@
 
   const SOURCE_PAGE = "browser-connection:page";
   const SOURCE_CONTENT = "browser-connection:content";
+  const SOURCE_RECORDER = "browser-connection:recorder";
   const pending = new Map();
   let nextId = 1;
 
@@ -70,4 +71,45 @@
   });
 
   window.dispatchEvent(new Event("browserConnection#initialized"));
+
+  installNavigationRecorder();
+
+  function installNavigationRecorder() {
+    if (window.__browserConnectionRecorderInstalled) {
+      return;
+    }
+    Object.defineProperty(window, "__browserConnectionRecorderInstalled", {
+      value: true,
+      enumerable: false,
+      configurable: false,
+      writable: false
+    });
+
+    const notify = () => {
+      window.postMessage(
+        {
+          source: SOURCE_RECORDER,
+          kind: "navigate",
+          href: location.href,
+          title: document.title || ""
+        },
+        window.location.origin
+      );
+    };
+
+    const pushState = history.pushState;
+    const replaceState = history.replaceState;
+    history.pushState = function (...args) {
+      const result = pushState.apply(this, args);
+      queueMicrotask(notify);
+      return result;
+    };
+    history.replaceState = function (...args) {
+      const result = replaceState.apply(this, args);
+      queueMicrotask(notify);
+      return result;
+    };
+    window.addEventListener("popstate", notify);
+    window.addEventListener("hashchange", notify);
+  }
 })();

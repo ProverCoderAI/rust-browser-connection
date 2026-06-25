@@ -8,6 +8,7 @@ const RECONNECT_MAX_MS = 30000;
 const RELAY_KEEPALIVE_MS = 20 * 1000;
 const PLATFORM_CONNECT_TTL_MS = 2 * 60 * 1000;
 const PLATFORM_RELAY_CONNECT_TIMEOUT_MS = 8000;
+const MAX_RECORDED_ACTIONS = 500;
 
 let state = {
   sharing: false,
@@ -25,6 +26,11 @@ let state = {
   workspaceId: "",
   poolId: "",
   browserName: "",
+  recording: false,
+  recordingTabId: null,
+  recordingStartedAt: "",
+  recordingStoppedAt: "",
+  recordedActions: [],
   updatedAt: ""
 };
 
@@ -69,8 +75,33 @@ async function handleExtensionMessage(message, sender) {
     return publicState();
   }
 
+  if (message.type === "get_recording") {
+    await restoreState();
+    return recordingState();
+  }
+
   if (message.type === "start_share") {
     return startShare(message.relayUrl || DEFAULT_RELAY_URL);
+  }
+
+  if (message.type === "start_recording") {
+    await restoreState();
+    return startRecording();
+  }
+
+  if (message.type === "stop_recording") {
+    await restoreState();
+    return stopRecording();
+  }
+
+  if (message.type === "clear_recording") {
+    await restoreState();
+    return clearRecording();
+  }
+
+  if (message.type === "recorder_action") {
+    await restoreState();
+    return recordContentAction(message.action || {}, sender);
   }
 
   if (message.type === "platform_request") {
@@ -153,6 +184,9 @@ async function stopShare() {
     shareUrl: "",
     status: "stopped",
     lastError: "",
+    recording: false,
+    recordingTabId: null,
+    recordingStoppedAt: new Date().toISOString(),
     platformOrigin: "",
     platformHref: "",
     workspaceId: "",
@@ -194,6 +228,11 @@ function publicState() {
     status: state.status,
     lastError: state.lastError,
     activeTabId: state.activeTabId,
+    recording: state.recording,
+    recordingTabId: state.recordingTabId,
+    recordingCount: Array.isArray(state.recordedActions) ? state.recordedActions.length : 0,
+    recordingStartedAt: state.recordingStartedAt,
+    recordingStoppedAt: state.recordingStoppedAt,
     platformOrigin: state.platformOrigin,
     workspaceId: state.workspaceId,
     poolId: state.poolId,
@@ -210,6 +249,33 @@ function notifyPopup() {
     });
   } catch (_error) {
     // Popup may be closed.
+  }
+}
+
+function notifyRecordingChanged() {
+  const message = {
+    type: "recording_state_changed",
+    recording: recordingState()
+  };
+
+  try {
+    chrome.tabs.query({}, (tabs) => {
+      const error = chrome.runtime.lastError;
+      if (error || !Array.isArray(tabs)) {
+        return;
+      }
+      for (const tab of tabs) {
+        if (!Number.isInteger(tab.id) || !isRecordableUrl(tab.url || "")) {
+          continue;
+        }
+        chrome.tabs.sendMessage(tab.id, message, () => {
+          // Some pages will not have this content script yet.
+          void chrome.runtime.lastError;
+        });
+      }
+    });
+  } catch (_error) {
+    // Tabs may be unavailable in restricted extension contexts.
   }
 }
 
@@ -560,6 +626,18 @@ async function handleCommand(command, params) {
   if (command === "activate_tab") {
     return commandActivateTab(params);
   }
+  if (command === "start_recording") {
+    return startRecording(params);
+  }
+  if (command === "stop_recording") {
+    return stopRecording();
+  }
+  if (command === "clear_recording") {
+    return clearRecording();
+  }
+  if (command === "recording_state") {
+    return recordingState();
+  }
 
   throw new Error(`Unsupported command: ${command}`);
 }
@@ -711,6 +789,176 @@ async function commandActivateTab(params) {
   state.activeTabId = tab.id;
   await persistState({ activeTabId: tab.id });
   return { tab: tabSummary(tab) };
+}
+
+async function startRecording(params = {}) {
+  const tabId = Number.isInteger(params.tabId) ? params.tabId : await getTargetTabId({});
+  const tab = await chromeCall(chrome.tabs.get, chrome.tabs, tabId);
+  const startedAt = new Date().toISOString();
+  const actions = [];
+  if (tab.url && isRecordableUrl(tab.url)) {
+    actions.push(recordedAction("navigate", {
+      url: tab.url,
+      title: tab.title || "",
+      tabId,
+      windowId: tab.windowId
+    }));
+  }
+
+  await persistState({
+    recording: true,
+    recordingTabId: null,
+    recordingStartedAt: startedAt,
+    recordingStoppedAt: "",
+    recordedActions: actions,
+    activeTabId: tabId
+  });
+
+  const recording = recordingState();
+  notifyRecordingChanged();
+  return recording;
+}
+
+async function stopRecording() {
+  await persistState({
+    recording: false,
+    recordingStoppedAt: new Date().toISOString()
+  });
+  const recording = recordingState();
+  notifyRecordingChanged();
+  return recording;
+}
+
+async function clearRecording() {
+  await persistState({
+    recording: false,
+    recordingTabId: null,
+    recordingStartedAt: "",
+    recordingStoppedAt: "",
+    recordedActions: []
+  });
+  const recording = recordingState();
+  notifyRecordingChanged();
+  return recording;
+}
+
+async function recordContentAction(action, sender) {
+  if (!state.recording || !sender?.tab || !Number.isInteger(sender.tab.id)) {
+    return { recorded: false };
+  }
+  if (!isRecordableUrl(sender.tab.url || action.url || "")) {
+    return { recorded: false };
+  }
+
+  const normalized = recordedAction(action.kind, {
+    ...action,
+    tabId: sender.tab.id,
+    windowId: sender.tab.windowId,
+    title: action.title || sender.tab.title || "",
+    url: action.url || sender.tab.url || ""
+  });
+  if (!normalized) {
+    return { recorded: false };
+  }
+
+  const actions = Array.isArray(state.recordedActions) ? [...state.recordedActions] : [];
+  upsertRecordedAction(actions, normalized);
+  while (actions.length > MAX_RECORDED_ACTIONS) {
+    actions.shift();
+  }
+
+  await persistState({ recordedActions: actions, activeTabId: sender.tab.id });
+  notifyRecordingChanged();
+  return { recorded: true, action: normalized, count: actions.length };
+}
+
+function recordingState() {
+  const actions = Array.isArray(state.recordedActions) ? state.recordedActions : [];
+  return {
+    recording: state.recording,
+    tabId: state.recordingTabId,
+    startedAt: state.recordingStartedAt,
+    stoppedAt: state.recordingStoppedAt,
+    count: actions.length,
+    actions,
+    script: renderRecordedPlaywright(actions)
+  };
+}
+
+function recordedAction(kind, fields) {
+  const actionKind = String(kind || "");
+  if (!["navigate", "click", "fill", "press"].includes(actionKind)) {
+    return null;
+  }
+  const action = {
+    id: randomHex(6),
+    kind: actionKind,
+    at: new Date().toISOString(),
+    url: String(fields.url || "").slice(0, 4096),
+    title: String(fields.title || "").slice(0, 512),
+    tabId: Number.isInteger(fields.tabId) ? fields.tabId : null,
+    windowId: Number.isInteger(fields.windowId) ? fields.windowId : null
+  };
+  if (fields.selector) action.selector = String(fields.selector).slice(0, 1024);
+  if (fields.text !== undefined) action.text = String(fields.text).slice(0, 4096);
+  if (fields.key) action.key = String(fields.key).slice(0, 128);
+  if (fields.label) action.label = String(fields.label).slice(0, 512);
+  if (fields.tag) action.tag = String(fields.tag).slice(0, 64);
+  return action;
+}
+
+function upsertRecordedAction(actions, action) {
+  const previous = actions[actions.length - 1];
+  if (
+    previous &&
+    action.kind === "fill" &&
+    previous.kind === "fill" &&
+    previous.selector === action.selector
+  ) {
+    actions[actions.length - 1] = { ...previous, ...action, id: previous.id };
+    return;
+  }
+  if (
+    previous &&
+    action.kind === "navigate" &&
+    previous.kind === "navigate" &&
+    previous.url === action.url
+  ) {
+    return;
+  }
+  actions.push(action);
+}
+
+function renderRecordedPlaywright(actions) {
+  const lines = [
+    "module.exports = async ({ page }) => {"
+  ];
+  let previousTabId = null;
+  for (const action of actions) {
+    if (action.tabId && action.tabId !== previousTabId) {
+      lines.push(`  // Tab ${action.tabId}${action.title ? `: ${action.title}` : ""}`);
+      previousTabId = action.tabId;
+    }
+    if (action.kind === "navigate" && action.url) {
+      lines.push(`  await page.goto(${JSON.stringify(action.url)});`);
+    } else if (action.kind === "click" && action.selector) {
+      lines.push(`  await page.click(${JSON.stringify(action.selector)});`);
+    } else if (action.kind === "fill" && action.selector) {
+      lines.push(`  await page.fill(${JSON.stringify(action.selector)}, ${JSON.stringify(action.text || "")});`);
+    } else if (action.kind === "press" && action.key) {
+      if (action.selector) {
+        lines.push(`  await page.press(${JSON.stringify(action.selector)}, ${JSON.stringify(action.key)});`);
+      } else {
+        lines.push(`  await page.keyboard.press(${JSON.stringify(action.key)});`);
+      }
+    }
+  }
+  lines.push("};");
+  return lines.join("\n");
+}
+
+function isRecordableUrl(url) {
+  return /^https?:\/\//i.test(String(url || ""));
 }
 
 async function getTargetTabId(params) {

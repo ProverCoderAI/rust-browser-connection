@@ -224,6 +224,46 @@ fn route_request(
             }
             activate_tab_response(runtime, request)
         }
+        ("GET", "/api/recording") => {
+            if !has_valid_control_token(request, control_token) {
+                return json_response(
+                    403,
+                    "Forbidden",
+                    json!({ "error": "invalid control token" }),
+                );
+            }
+            recording_response(runtime, "state")
+        }
+        ("POST", "/api/recording/start") | ("GET", "/api/recording/start") => {
+            if !has_valid_control_token(request, control_token) {
+                return json_response(
+                    403,
+                    "Forbidden",
+                    json!({ "error": "invalid control token" }),
+                );
+            }
+            recording_response(runtime, "start")
+        }
+        ("POST", "/api/recording/stop") | ("GET", "/api/recording/stop") => {
+            if !has_valid_control_token(request, control_token) {
+                return json_response(
+                    403,
+                    "Forbidden",
+                    json!({ "error": "invalid control token" }),
+                );
+            }
+            recording_response(runtime, "stop")
+        }
+        ("POST", "/api/recording/clear") | ("GET", "/api/recording/clear") => {
+            if !has_valid_control_token(request, control_token) {
+                return json_response(
+                    403,
+                    "Forbidden",
+                    json!({ "error": "invalid control token" }),
+                );
+            }
+            recording_response(runtime, "clear")
+        }
         ("POST", "/api/share") | ("GET", "/api/share") => {
             if !has_valid_control_token(request, control_token) {
                 return json_response(
@@ -329,6 +369,23 @@ fn activate_tab_response(runtime: Arc<Mutex<McpRuntime>>, request: &HttpRequest)
         .lock()
         .map_err(|_| anyhow!("MCP runtime lock was poisoned"))
         .and_then(|mut runtime| runtime.activate_shared_tab_from_panel(tab_id));
+    match result {
+        Ok(value) => json_response(200, "OK", value),
+        Err(error) => json_response(400, "Bad Request", json!({ "error": error.to_string() })),
+    }
+}
+
+fn recording_response(runtime: Arc<Mutex<McpRuntime>>, action: &str) -> HttpResponse {
+    let result = runtime
+        .lock()
+        .map_err(|_| anyhow!("MCP runtime lock was poisoned"))
+        .and_then(|runtime| match action {
+            "state" => runtime.shared_recording_state_from_panel(),
+            "start" => runtime.start_shared_recording_from_panel(),
+            "stop" => runtime.stop_shared_recording_from_panel(),
+            "clear" => runtime.clear_shared_recording_from_panel(),
+            _ => Err(anyhow!("unknown recording action")),
+        });
     match result {
         Ok(value) => json_response(200, "OK", value),
         Err(error) => json_response(400, "Bad Request", json!({ "error": error.to_string() })),
@@ -507,368 +564,13 @@ fn escape_js_string(value: &str) -> String {
 }
 
 fn control_panel_html(control_token: &str, project_id: &str) -> String {
-    format!(
-        r##"<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>browser-connection</title>
-<style>
-:root {{ color-scheme: light dark; --bg: #f7f8fa; --panel: #ffffff; --text: #1b1f24; --muted: #667085; --line: #d0d7de; --accent: #0f766e; --accent-strong: #115e59; }}
-@media (prefers-color-scheme: dark) {{
-  :root {{ --bg: #101418; --panel: #171c22; --text: #eef2f6; --muted: #a9b4c0; --line: #2b333d; --accent: #2dd4bf; --accent-strong: #5eead4; }}
-}}
-* {{ box-sizing: border-box; }}
-[hidden] {{ display: none !important; }}
-body {{ margin: 0; min-height: 100vh; background: var(--bg); color: var(--text); font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }}
-.shell {{ display: grid; grid-template-columns: minmax(240px, 320px) minmax(0, 1fr); min-height: 100vh; }}
-aside {{ border-right: 1px solid var(--line); background: var(--panel); padding: 16px; }}
-main {{ min-width: 0; min-height: 100vh; display: flex; flex-direction: column; }}
-h1 {{ margin: 0 0 16px; font-size: 18px; font-weight: 650; }}
-label {{ display: block; margin-bottom: 6px; color: var(--muted); font-size: 12px; font-weight: 650; text-transform: uppercase; }}
-select, button {{ width: 100%; min-height: 36px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); color: var(--text); font: inherit; }}
-select {{ padding: 0 10px; }}
-input {{ width: 100%; min-height: 36px; margin-bottom: 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); color: var(--text); font: inherit; padding: 0 10px; }}
-button {{ margin-top: 10px; cursor: pointer; background: var(--accent); border-color: var(--accent); color: #ffffff; font-weight: 650; }}
-button:hover {{ background: var(--accent-strong); }}
-.meta {{ margin-top: 16px; display: grid; gap: 8px; color: var(--muted); font-size: 13px; overflow-wrap: anywhere; }}
-.share {{ margin-top: 18px; padding-top: 16px; border-top: 1px solid var(--line); }}
-.connect {{ margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--line); }}
-.connect-status {{ margin-top: 8px; min-height: 34px; color: var(--muted); font-size: 12px; line-height: 1.35; overflow-wrap: anywhere; }}
-.meta strong {{ color: var(--text); font-weight: 650; }}
-.toolbar {{ display: flex; align-items: center; gap: 10px; min-height: 44px; padding: 8px 12px; border-bottom: 1px solid var(--line); background: var(--panel); }}
-.toolbar a {{ color: var(--accent-strong); text-decoration: none; font-weight: 650; }}
-.frame {{ flex: 1; min-height: 0; border: 0; background: #000; }}
-.empty {{ flex: 1; display: grid; place-items: center; color: var(--muted); }}
-.activity {{ flex: 1; min-height: 0; overflow: auto; padding: 14px; }}
-.activity-grid {{ display: grid; grid-template-columns: minmax(260px, 1fr) minmax(260px, 1fr); gap: 14px; }}
-.activity-panel {{ border: 1px solid var(--line); border-radius: 6px; background: var(--panel); padding: 12px; min-width: 0; }}
-.activity h2 {{ margin: 0 0 10px; font-size: 14px; }}
-.stats {{ display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; margin-bottom: 14px; }}
-.stat {{ border: 1px solid var(--line); border-radius: 6px; padding: 8px; background: var(--panel); min-width: 0; }}
-.stat strong, .row strong {{ display: block; font-size: 18px; }}
-.row {{ border-top: 1px solid var(--line); padding: 8px 0; color: var(--muted); overflow-wrap: anywhere; white-space: pre-wrap; }}
-.row:first-child {{ border-top: 0; padding-top: 0; }}
-.window-group {{ border: 1px solid var(--line); border-radius: 6px; margin: 10px 0; overflow: hidden; background: color-mix(in srgb, var(--panel) 88%, var(--line)); }}
-.window-head {{ width: 100%; margin: 0; display: flex; justify-content: space-between; gap: 10px; padding: 10px; border: 0; border-bottom: 1px solid var(--line); border-radius: 0; background: transparent; color: var(--text); text-align: left; font-weight: 650; }}
-.window-head:hover {{ background: transparent; }} .window-head::before {{ content: "▾"; color: var(--muted); }} .window-collapsed .window-head {{ border-bottom: 0; }} .window-collapsed .window-head::before {{ content: "▸"; }} .window-body[hidden] {{ display: none !important; }}
-.window-meta {{ color: var(--muted); font-size: 12px; font-weight: 500; }}
-.tab-row {{ display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px; align-items: center; padding: 9px 10px; border-top: 1px solid var(--line); }}
-.tab-row:first-child {{ border-top: 0; }}
-.tab-title {{ font-weight: 600; overflow-wrap: anywhere; }}
-.tab-url {{ color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }}
-.tab-active {{ box-shadow: inset 3px 0 0 var(--accent); }}
-.thumbs {{ display: flex; gap: 8px; overflow-x: auto; margin-top: 8px; }}
-.thumbs img {{ width: 96px; height: 64px; object-fit: cover; border: 1px solid var(--line); border-radius: 4px; }}
-#latestScreenshot {{ width: 100%; max-height: 46vh; object-fit: contain; background: #000; border-radius: 4px; }}
-.tab-button {{ margin: 6px 0 0; min-height: 28px; width: auto; padding: 0 10px; font-size: 12px; }}
-.error {{ color: #ef4444; }}
-@media (max-width: 760px) {{
-  .shell {{ grid-template-columns: 1fr; }}
-  aside {{ border-right: 0; border-bottom: 1px solid var(--line); }}
-  main {{ min-height: 70vh; }}
-  .activity-grid, .stats {{ grid-template-columns: 1fr; }}
-}}
-</style>
-</head>
-<body>
-<div class="shell">
-  <aside>
-    <h1>browser-connection</h1>
-    <label for="browserSelect">Browser</label>
-    <select id="browserSelect"></select>
-    <button id="selectButton" type="button">Select</button>
-    <div class="connect">
-      <button id="connectEdgeButton" type="button">Connect Edge</button>
-      <div id="connectStatus" class="connect-status">Checking Edge extension</div>
-    </div>
-    <div class="share">
-      <label for="shareName">Shared Link</label>
-      <input id="shareName" value="edge" autocomplete="off" spellcheck="false">
-      <input id="shareUrl" placeholder="Paste browser share link" autocomplete="off" spellcheck="false">
-      <button id="shareButton" type="button">Add Shared Browser</button>
-    </div>
-    <div class="meta">
-      <div><strong>Active</strong><br><span id="activeName">-</span></div>
-      <div><strong>CDP</strong><br><span id="cdpEndpoint">-</span></div>
-      <div><strong>noVNC</strong><br><span id="novncUrl">-</span></div>
-    </div>
-  </aside>
-  <main>
-    <div class="toolbar"><a id="openNovnc" href="#" target="_blank" rel="noreferrer">Open noVNC</a></div>
-    <iframe id="novncFrame" class="frame" title="noVNC"></iframe>
-    <div id="emptyState" class="empty" hidden>No noVNC display</div>
-    <section id="activityPanel" class="activity" hidden>
-      <div class="stats">
-        <div class="stat"><label>Mode</label><strong id="activityMode">-</strong></div>
-        <div class="stat"><label>Windows</label><strong id="windowCount">0</strong></div>
-        <div class="stat"><label>Tabs</label><strong id="tabCount">0</strong></div>
-        <div class="stat"><label>Events</label><strong id="eventCount">0</strong></div>
-      </div>
-      <div class="activity-grid">
-        <section class="activity-panel"><h2>Screenshot</h2><img id="latestScreenshot" alt="" hidden><div id="screenshotEmpty" class="row">No screenshots yet</div><div id="screenshotThumbs" class="thumbs"></div></section>
-        <section class="activity-panel"><h2>Tabs</h2><div id="activeTab" class="row">-</div><div id="tabsError" class="row error" hidden></div><div id="tabsList"></div></section>
-        <section class="activity-panel"><h2>Activity</h2><div id="eventLog"></div></section>
-      </div>
-    </section>
-  </main>
-</div>
-<script>
-const personalName = "{personal}";
-const projectId = "{project_id}";
-const controlToken = "{control_token}";
-const edgeBrowserName = "edge";
-let lastActive = "";
-let autoConnectStarted = false;
-let activityVisible = false;
-let collapsedWindows = loadCollapsedWindows();
-
-async function loadInventory() {{
-  const response = await fetch("/api/browsers", {{ cache: "no-store" }});
-  if (!response.ok) throw new Error(await response.text());
-  const inventory = await response.json();
-  renderInventory(inventory);
-}}
-
-function renderInventory(inventory) {{
-  const select = document.getElementById("browserSelect");
-  const previous = select.value;
-  select.replaceChildren();
-  for (const browser of inventory.browsers || []) {{
-    const option = document.createElement("option");
-    option.value = browser.name;
-    option.textContent = browser.name === personalName ? "personal" : browser.name;
-    if (browser.active) option.selected = true;
-    select.appendChild(option);
-  }}
-  if (previous && [...select.options].some(option => option.value === previous)) {{
-    select.value = previous;
-  }}
-
-  const active = (inventory.browsers || []).find(browser => browser.active) || null;
-  document.getElementById("activeName").textContent = inventory.active || "-";
-  document.getElementById("cdpEndpoint").textContent = active?.cdpEndpoint || "-";
-  document.getElementById("novncUrl").textContent = active?.novncUrl || "-";
-  setFrame(active?.novncUrl || "", active?.kind === "shared-extension");
-}}
-
-function setFrame(url, showActivity) {{
-  const frame = document.getElementById("novncFrame");
-  const empty = document.getElementById("emptyState");
-  const activity = document.getElementById("activityPanel");
-  const link = document.getElementById("openNovnc");
-  link.href = url || "#";
-  link.style.pointerEvents = url ? "auto" : "none";
-  link.style.opacity = url ? "1" : "0.45";
-  activityVisible = !url && showActivity;
-  activity.hidden = !activityVisible;
-  if (!url) {{
-    frame.hidden = true;
-    empty.hidden = activityVisible;
-    frame.removeAttribute("src");
-    lastActive = "";
-    return;
-  }}
-  empty.hidden = true;
-  frame.hidden = false;
-  if (url !== lastActive) {{
-    frame.src = url;
-    lastActive = url;
-  }}
-}}
-
-async function selectBrowser() {{
-  const select = document.getElementById("browserSelect");
-  const name = select.value;
-  if (!name) return;
-  const response = await apiFetch("/api/select?name=" + encodeURIComponent(name), {{ method: "POST" }});
-  if (!response.ok) throw new Error(await response.text());
-  await loadInventory();
-}}
-
-async function connectEdge(auto) {{
-  if (!window.browserConnection || typeof window.browserConnection.request !== "function") {{
-    setConnectStatus("Edge extension is not available on this page.");
-    return;
-  }}
-
-  setConnectStatus(auto ? "Requesting Edge connection" : "Opening Edge connection request");
-  const result = await window.browserConnection.request({{
-    method: "connect",
-    params: {{
-      protocolVersion: 1,
-      relayUrl: window.location.origin,
-      workspaceId: projectId,
-      poolId: "current-runtime",
-      browserName: edgeBrowserName,
-      displayName: "Edge"
-    }}
-  }});
-  if (!result || !result.shareUrl) {{
-    throw new Error("Edge extension did not return a share URL");
-  }}
-  await registerShare(edgeBrowserName, result.shareUrl);
-  setConnectStatus("Edge connected to this browser pool.");
-}}
-
-async function registerShare(name, shareUrl) {{
-  const body = new URLSearchParams({{ name, share_url: shareUrl }});
-  const response = await apiFetch("/api/share", {{
-    method: "POST",
-    headers: {{ "Content-Type": "application/x-www-form-urlencoded" }},
-    body
-  }});
-  if (!response.ok) throw new Error(await response.text());
-  await loadInventory();
-}}
-
-function maybeAutoConnectEdge() {{
-  if (autoConnectStarted) return;
-  autoConnectStarted = true;
-  if (!window.browserConnection || typeof window.browserConnection.request !== "function") {{
-    setConnectStatus("Install or enable Edge Share extension to connect this Edge.");
-    return;
-  }}
-  const key = "browserConnectionAutoConnect:" + window.location.origin + window.location.pathname;
-  if (sessionStorage.getItem(key) === "1") {{
-    setConnectStatus("Edge Share extension detected.");
-    return;
-  }}
-  sessionStorage.setItem(key, "1");
-  connectEdge(true).catch(error => setConnectStatus(error.message || String(error)));
-}}
-
-async function loadActivity() {{
-  if (!activityVisible) return;
-  const response = await apiFetch("/api/activity?refresh=1", {{ cache: "no-store" }});
-  if (!response.ok) throw new Error(await response.text());
-  renderActivity(await response.json());
-}}
-
-function renderActivity(activity) {{
-  const tabs = activity.tabs || {{}};
-  const events = activity.events || [];
-  const shots = activity.screenshots || [];
-  text("activityMode", activity.mode || "-");
-  text("windowCount", tabs.totalWindows || 0);
-  text("tabCount", tabs.totalTabs || 0);
-  text("eventCount", events.length);
-  const active = tabs.activeTab || null;
-  document.getElementById("activeTab").textContent = active ? (active.title || "(untitled)") + "\n" + (active.url || "") : "-";
-  const err = document.getElementById("tabsError");
-  err.hidden = !activity.tabsError;
-  err.textContent = activity.tabsError || "";
-  renderScreenshot(activity.latestScreenshot, shots);
-  renderTabs(tabs.windows || []);
-  renderEvents(events);
-}}
-
-function renderScreenshot(latest, shots) {{
-  const image = document.getElementById("latestScreenshot");
-  const empty = document.getElementById("screenshotEmpty");
-  image.hidden = !latest?.dataUrl;
-  empty.hidden = !!latest?.dataUrl;
-  if (latest?.dataUrl) image.src = latest.dataUrl;
-  const thumbs = document.getElementById("screenshotThumbs");
-  thumbs.replaceChildren(...shots.slice(0, 8).filter(s => s.dataUrl).map(s => el("img", {{ src: s.dataUrl, title: new Date(s.at).toLocaleTimeString() }})));
-}}
-
-function renderTabs(windows) {{
-  const groups = [];
-  for (const win of windows) {{
-    const windowId = String(win.windowId ?? win.id ?? "-");
-    const collapsed = collapsedWindows.has(windowId);
-    const group = el("section", {{ className: "window-group" + (collapsed ? " window-collapsed" : "") }});
-    const head = el("button", {{ className: "window-head", onclick: () => toggleWindow(windowId) }}, "Window " + windowId);
-    head.appendChild(el("span", {{ className: "window-meta" }}, (win.profile || (win.incognito ? "incognito" : "regular")) + " " + (win.focused ? "focused " : "") + (win.type || "") + " " + (win.state || "") + " · " + (win.tabCount || 0) + " tabs"));
-    group.appendChild(head);
-    const bodyWrap = el("div", {{ className: "window-body" }});
-    bodyWrap.hidden = collapsed;
-    for (const tab of win.tabs || []) {{
-      const row = el("div", {{ className: "tab-row" + (tab.active ? " tab-active" : "") }});
-      const body = el("div");
-      body.appendChild(el("div", {{ className: "tab-title" }}, (tab.active ? "Active: " : "") + (tab.title || "(untitled)")));
-      body.appendChild(el("div", {{ className: "tab-url" }}, (tab.profile || "") + " " + (tab.url || "")));
-      row.appendChild(body);
-      row.appendChild(el("button", {{ className: "tab-button", onclick: () => activateTab(tab.id) }}, "Activate"));
-      bodyWrap.appendChild(row);
-    }}
-    group.appendChild(bodyWrap);
-    groups.push(group);
-  }}
-  document.getElementById("tabsList").replaceChildren(...groups);
-}}
-
-function toggleWindow(windowId) {{
-  collapsedWindows.has(windowId) ? collapsedWindows.delete(windowId) : collapsedWindows.add(windowId);
-  localStorage.setItem("browserConnectionCollapsedWindows", JSON.stringify([...collapsedWindows]));
-  loadActivity().catch(error => console.error(error));
-}}
-
-function loadCollapsedWindows() {{ try {{ return new Set(JSON.parse(localStorage.getItem("browserConnectionCollapsedWindows") || "[]")); }} catch (_error) {{ return new Set(); }} }}
-
-function renderEvents(events) {{
-  document.getElementById("eventLog").replaceChildren(...events.slice(0, 40).map(event => {{
-    const status = event.ok ? "ok" : "error";
-    const summary = event.error || event.result?.url || event.result?.title || event.result?.text || "";
-    return el("div", {{ className: "row" }}, new Date(event.at).toLocaleTimeString() + " " + event.tool + " " + status + " " + event.durationMs + "ms\n" + String(summary).slice(0, 240));
-  }}));
-}}
-
-async function activateTab(tabId) {{
-  if (!Number.isInteger(tabId)) return;
-  await apiFetch("/api/activate-tab?tab_id=" + encodeURIComponent(tabId), {{ method: "POST" }});
-  await loadActivity();
-}}
-
-function text(id, value) {{ document.getElementById(id).textContent = value; }}
-function el(tag, props = {{}}, body = "") {{
-  const node = document.createElement(tag);
-  Object.assign(node, props);
-  if (body) node.textContent = body;
-  return node;
-}}
-
-function setConnectStatus(message) {{
-  document.getElementById("connectStatus").textContent = message;
-}}
-
-function apiFetch(url, options = {{}}) {{
-  const headers = new Headers(options.headers || {{}});
-  headers.set("X-Browser-Control-Token", controlToken);
-  return fetch(url, {{ ...options, headers }});
-}}
-
-document.getElementById("selectButton").addEventListener("click", () => {{
-  selectBrowser().catch(error => console.error(error));
-}});
-document.getElementById("browserSelect").addEventListener("change", () => {{
-  selectBrowser().catch(error => console.error(error));
-}});
-document.getElementById("connectEdgeButton").addEventListener("click", () => {{
-  sessionStorage.removeItem("browserConnectionAutoConnect:" + window.location.origin + window.location.pathname);
-  connectEdge(false).catch(error => setConnectStatus(error.message || String(error)));
-}});
-document.getElementById("shareButton").addEventListener("click", async () => {{
-  const name = document.getElementById("shareName").value.trim() || "edge";
-  const shareUrl = document.getElementById("shareUrl").value.trim();
-  if (!shareUrl) return;
-  await registerShare(name, shareUrl);
-}});
-window.addEventListener("browserConnection#initialized", maybeAutoConnectEdge);
-setTimeout(maybeAutoConnectEdge, 300);
-loadInventory().catch(error => console.error(error));
-setInterval(() => loadInventory().catch(error => console.error(error)), 1000);
-setInterval(() => loadActivity().catch(error => console.error(error)), 1000);
-</script>
-</body>
-</html>
-"##,
-        personal = PERSONAL_BROWSER_NAME,
-        project_id = escape_js_string(project_id),
-        control_token = control_token
-    )
+    include_str!("control_panel.html")
+        .replace(
+            "__PERSONAL_BROWSER_NAME__",
+            &escape_js_string(PERSONAL_BROWSER_NAME),
+        )
+        .replace("__PROJECT_ID__", &escape_js_string(project_id))
+        .replace("__CONTROL_TOKEN__", &escape_js_string(control_token))
 }
 
 #[cfg(test)]

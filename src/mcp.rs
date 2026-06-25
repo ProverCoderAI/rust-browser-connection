@@ -331,6 +331,34 @@ impl McpRuntime {
             .context("failed to activate shared browser tab")
     }
 
+    fn shared_recording_state_from_panel(&self) -> Result<Value> {
+        let share_url = self
+            .active_share_url()
+            .ok_or_else(|| anyhow!("active browser is not a shared-extension browser"))?;
+        SharedBrowserClient::new(share_url).recording_state()
+    }
+
+    fn start_shared_recording_from_panel(&self) -> Result<Value> {
+        let share_url = self
+            .active_share_url()
+            .ok_or_else(|| anyhow!("active browser is not a shared-extension browser"))?;
+        SharedBrowserClient::new(share_url).start_recording()
+    }
+
+    fn stop_shared_recording_from_panel(&self) -> Result<Value> {
+        let share_url = self
+            .active_share_url()
+            .ok_or_else(|| anyhow!("active browser is not a shared-extension browser"))?;
+        SharedBrowserClient::new(share_url).stop_recording()
+    }
+
+    fn clear_shared_recording_from_panel(&self) -> Result<Value> {
+        let share_url = self
+            .active_share_url()
+            .ok_or_else(|| anyhow!("active browser is not a shared-extension browser"))?;
+        SharedBrowserClient::new(share_url).clear_recording()
+    }
+
     fn managed_cdp_endpoint(&mut self) -> Result<String> {
         if self.managed_cdp_endpoint.is_none() {
             self.managed_cdp_endpoint = Some(resolve_managed_cdp_endpoint(&self.config)?);

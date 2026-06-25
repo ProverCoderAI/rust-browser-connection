@@ -7,16 +7,27 @@ const shareUrlInput = document.getElementById("shareUrl");
 const shareButton = document.getElementById("shareButton");
 const stopButton = document.getElementById("stopButton");
 const copyButton = document.getElementById("copyButton");
+const recordButton = document.getElementById("recordButton");
+const stopRecordButton = document.getElementById("stopRecordButton");
+const clearRecordButton = document.getElementById("clearRecordButton");
+const copyScriptButton = document.getElementById("copyScriptButton");
+const recordingStatus = document.getElementById("recordingStatus");
+const recordedScript = document.getElementById("recordedScript");
 const statusDot = document.getElementById("statusDot");
 const statusText = document.getElementById("statusText");
 const errorText = document.getElementById("errorText");
 
 let currentState = null;
+let currentRecording = null;
 
 document.addEventListener("DOMContentLoaded", () => {
   shareButton.addEventListener("click", onShare);
   stopButton.addEventListener("click", onStop);
   copyButton.addEventListener("click", onCopy);
+  recordButton.addEventListener("click", onRecord);
+  stopRecordButton.addEventListener("click", onStopRecord);
+  clearRecordButton.addEventListener("click", onClearRecord);
+  copyScriptButton.addEventListener("click", onCopyScript);
 
   refreshState();
   setInterval(refreshState, 1000);
@@ -78,10 +89,74 @@ async function onCopy() {
   }
 }
 
+async function onRecord() {
+  setBusy(true);
+  clearError();
+
+  try {
+    const response = await sendMessage({ type: "start_recording" });
+    renderRecording(response);
+  } catch (error) {
+    showError(error);
+  } finally {
+    setBusy(false);
+  }
+}
+
+async function onStopRecord() {
+  setBusy(true);
+  clearError();
+
+  try {
+    const response = await sendMessage({ type: "stop_recording" });
+    renderRecording(response);
+  } catch (error) {
+    showError(error);
+  } finally {
+    setBusy(false);
+  }
+}
+
+async function onClearRecord() {
+  setBusy(true);
+  clearError();
+
+  try {
+    const response = await sendMessage({ type: "clear_recording" });
+    renderRecording(response);
+  } catch (error) {
+    showError(error);
+  } finally {
+    setBusy(false);
+  }
+}
+
+async function onCopyScript() {
+  clearError();
+
+  try {
+    const script = recordedScript.value.trim();
+    if (!script) {
+      throw new Error("No recorded script to copy");
+    }
+    await navigator.clipboard.writeText(script);
+    copyScriptButton.textContent = "Copied";
+    setTimeout(() => {
+      copyScriptButton.textContent = "Copy script";
+    }, 1200);
+  } catch (error) {
+    showError(error);
+  }
+}
+
 async function refreshState() {
   try {
-    const response = await sendMessage({ type: "get_state" });
-    renderState(response);
+    const [stateResponse, recordingResponse] = await Promise.all([
+      sendMessage({ type: "get_state" }),
+      sendMessage({ type: "get_recording" })
+    ]);
+    renderState(stateResponse);
+    renderRecording(recordingResponse);
   } catch (error) {
     showError(error);
   }
@@ -103,12 +178,25 @@ function renderState(state) {
   statusText.textContent = statusLabel(currentState);
   stopButton.disabled = !currentState.sharing;
   copyButton.disabled = !currentState.shareUrl;
+  recordButton.disabled = false;
+  stopRecordButton.disabled = !currentState.recording;
 
   if (currentState.lastError) {
     showError(currentState.lastError);
   } else {
     clearError();
   }
+}
+
+function renderRecording(recording) {
+  currentRecording = recording || {};
+  const count = currentRecording.count || 0;
+  recordingStatus.textContent = currentRecording.recording ? `recording ${count}` : `idle ${count}`;
+  recordingStatus.classList.toggle("active", !!currentRecording.recording);
+  recordedScript.value = currentRecording.script || "";
+  stopRecordButton.disabled = !currentRecording.recording;
+  clearRecordButton.disabled = count === 0 && !currentRecording.recording;
+  copyScriptButton.disabled = !recordedScript.value.trim();
 }
 
 function statusLabel(state) {
@@ -139,6 +227,10 @@ function setBusy(busy) {
   shareButton.disabled = busy;
   stopButton.disabled = busy || !(currentState && currentState.sharing);
   copyButton.disabled = busy || !(currentState && currentState.shareUrl);
+  recordButton.disabled = busy;
+  stopRecordButton.disabled = busy || !(currentRecording && currentRecording.recording);
+  clearRecordButton.disabled = busy || !(currentRecording && (currentRecording.count || currentRecording.recording));
+  copyScriptButton.disabled = busy || !recordedScript.value.trim();
 }
 
 function sendMessage(message) {
