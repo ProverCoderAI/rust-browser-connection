@@ -28,9 +28,14 @@ let state = {
   browserName: "",
   recording: false,
   recordingTabId: null,
+  recorderMode: "record",
   recordingStartedAt: "",
   recordingStoppedAt: "",
   recordedActions: [],
+  lastInspect: null,
+  playbackRunning: false,
+  playbackError: "",
+  playbackStepId: "",
   updatedAt: ""
 };
 
@@ -86,7 +91,12 @@ async function handleExtensionMessage(message, sender) {
 
   if (message.type === "start_recording") {
     await restoreState();
-    return startRecording();
+    return startRecording(message.params || {});
+  }
+
+  if (message.type === "set_recording_mode") {
+    await restoreState();
+    return setRecordingMode(message.mode);
   }
 
   if (message.type === "stop_recording") {
@@ -102,6 +112,16 @@ async function handleExtensionMessage(message, sender) {
   if (message.type === "recorder_action") {
     await restoreState();
     return recordContentAction(message.action || {}, sender);
+  }
+
+  if (message.type === "inspect_target") {
+    await restoreState();
+    return recordInspectTarget(message.target || {}, sender);
+  }
+
+  if (message.type === "play_recording") {
+    await restoreState();
+    return playRecording();
   }
 
   if (message.type === "platform_request") {
@@ -186,7 +206,11 @@ async function stopShare() {
     lastError: "",
     recording: false,
     recordingTabId: null,
+    recorderMode: "record",
     recordingStoppedAt: new Date().toISOString(),
+    playbackRunning: false,
+    playbackError: "",
+    playbackStepId: "",
     platformOrigin: "",
     platformHref: "",
     workspaceId: "",
@@ -230,6 +254,7 @@ function publicState() {
     activeTabId: state.activeTabId,
     recording: state.recording,
     recordingTabId: state.recordingTabId,
+    recorderMode: state.recorderMode || "record",
     recordingCount: Array.isArray(state.recordedActions) ? state.recordedActions.length : 0,
     recordingStartedAt: state.recordingStartedAt,
     recordingStoppedAt: state.recordingStoppedAt,
@@ -629,11 +654,17 @@ async function handleCommand(command, params) {
   if (command === "start_recording") {
     return startRecording(params);
   }
+  if (command === "set_recording_mode") {
+    return setRecordingMode(params.mode);
+  }
   if (command === "stop_recording") {
     return stopRecording();
   }
   if (command === "clear_recording") {
     return clearRecording();
+  }
+  if (command === "play_recording") {
+    return playRecording();
   }
   if (command === "recording_state") {
     return recordingState();
@@ -808,9 +839,13 @@ async function startRecording(params = {}) {
   await persistState({
     recording: true,
     recordingTabId: null,
+    recorderMode: normalizeRecorderMode(params.mode),
     recordingStartedAt: startedAt,
     recordingStoppedAt: "",
     recordedActions: actions,
+    lastInspect: null,
+    playbackError: "",
+    playbackStepId: "",
     activeTabId: tabId
   });
 
@@ -819,10 +854,26 @@ async function startRecording(params = {}) {
   return recording;
 }
 
+async function setRecordingMode(mode) {
+  if (!state.recording) {
+    return startRecording({ mode });
+  }
+  await persistState({
+    recorderMode: normalizeRecorderMode(mode),
+    lastInspect: null
+  });
+  const recording = recordingState();
+  notifyRecordingChanged();
+  return recording;
+}
+
 async function stopRecording() {
   await persistState({
     recording: false,
-    recordingStoppedAt: new Date().toISOString()
+    recorderMode: "record",
+    recordingStoppedAt: new Date().toISOString(),
+    lastInspect: null,
+    playbackRunning: false
   });
   const recording = recordingState();
   notifyRecordingChanged();
@@ -833,9 +884,14 @@ async function clearRecording() {
   await persistState({
     recording: false,
     recordingTabId: null,
+    recorderMode: "record",
     recordingStartedAt: "",
     recordingStoppedAt: "",
-    recordedActions: []
+    recordedActions: [],
+    lastInspect: null,
+    playbackRunning: false,
+    playbackError: "",
+    playbackStepId: ""
   });
   const recording = recordingState();
   notifyRecordingChanged();
@@ -844,6 +900,9 @@ async function clearRecording() {
 
 async function recordContentAction(action, sender) {
   if (!state.recording || !sender?.tab || !Number.isInteger(sender.tab.id)) {
+    return { recorded: false };
+  }
+  if ((state.recorderMode || "record") !== "record") {
     return { recorded: false };
   }
   if (!isRecordableUrl(sender.tab.url || action.url || "")) {
@@ -872,17 +931,147 @@ async function recordContentAction(action, sender) {
   return { recorded: true, action: normalized, count: actions.length };
 }
 
+async function recordInspectTarget(target, sender) {
+  if (!state.recording || (state.recorderMode || "record") !== "inspect") {
+    return { inspected: false };
+  }
+  if (!sender?.tab || !Number.isInteger(sender.tab.id)) {
+    return { inspected: false };
+  }
+  if (!isRecordableUrl(sender.tab.url || target.url || "")) {
+    return { inspected: false };
+  }
+
+  const inspected = {
+    at: new Date().toISOString(),
+    selector: String(target.selector || "").slice(0, 1024),
+    label: String(target.label || "").slice(0, 512),
+    tag: String(target.tag || "").slice(0, 64),
+    url: String(target.url || sender.tab.url || "").slice(0, 4096),
+    title: String(target.title || sender.tab.title || "").slice(0, 512),
+    tabId: sender.tab.id,
+    windowId: sender.tab.windowId
+  };
+
+  await persistState({ lastInspect: inspected, activeTabId: sender.tab.id });
+  notifyRecordingChanged();
+  return { inspected: true, target: inspected };
+}
+
+async function playRecording() {
+  const actions = Array.isArray(state.recordedActions) ? [...state.recordedActions] : [];
+  if (actions.length === 0) {
+    throw new Error("No recorded actions to play");
+  }
+
+  await persistState({
+    playbackRunning: true,
+    playbackError: "",
+    playbackStepId: ""
+  });
+  notifyRecordingChanged();
+
+  let caught = null;
+  try {
+    for (const action of actions) {
+      await persistState({ playbackStepId: action.id || "" });
+      notifyRecordingChanged();
+      await playRecordedAction(action);
+    }
+  } catch (error) {
+    caught = error;
+    await persistState({ playbackError: errorMessage(error) });
+  } finally {
+    await persistState({ playbackRunning: false });
+    notifyRecordingChanged();
+  }
+
+  if (caught) {
+    throw caught;
+  }
+  return recordingState();
+}
+
+async function playRecordedAction(action) {
+  const tabId = await playbackTabId(action);
+  if (action.kind === "navigate" && action.url) {
+    await chromeCall(chrome.tabs.update, chrome.tabs, tabId, {
+      url: action.url,
+      active: true
+    });
+    state.activeTabId = tabId;
+    await waitForTabReady(tabId, 10000);
+    return;
+  }
+  if (action.kind === "click" && action.selector) {
+    await runFunctionInPage(tabId, clickSelector, [action.selector]);
+    return;
+  }
+  if (action.kind === "fill" && action.selector) {
+    await runFunctionInPage(tabId, typeText, [action.selector, action.text || "", true]);
+    return;
+  }
+  if (action.kind === "press" && action.key) {
+    if (action.selector) {
+      await runFunctionInPage(tabId, focusSelector, [action.selector]);
+    }
+    const key = normalizeKey(action.key);
+    await sendKeyEvent(tabId, key, "rawKeyDown");
+    if (key.text) {
+      await sendKeyEvent(tabId, key, "char");
+    }
+    await sendKeyEvent(tabId, key, "keyUp");
+  }
+}
+
+async function playbackTabId(action) {
+  if (Number.isInteger(action.tabId)) {
+    try {
+      await chromeCall(chrome.tabs.get, chrome.tabs, action.tabId);
+      state.activeTabId = action.tabId;
+      return action.tabId;
+    } catch (_error) {
+      // The original tab was closed; fall back to the active tab.
+    }
+  }
+  return getTargetTabId({});
+}
+
+async function waitForTabReady(tabId, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      const tab = await chromeCall(chrome.tabs.get, chrome.tabs, tabId);
+      if (tab.status === "complete") {
+        return;
+      }
+    } catch (_error) {
+      return;
+    }
+    await sleep(100);
+  }
+}
+
 function recordingState() {
   const actions = Array.isArray(state.recordedActions) ? state.recordedActions : [];
   return {
     recording: state.recording,
+    mode: state.recorderMode || "record",
     tabId: state.recordingTabId,
     startedAt: state.recordingStartedAt,
     stoppedAt: state.recordingStoppedAt,
     count: actions.length,
     actions,
+    lastInspect: state.lastInspect || null,
+    playing: !!state.playbackRunning,
+    playbackError: state.playbackError || "",
+    playbackStepId: state.playbackStepId || "",
     script: renderRecordedPlaywright(actions)
   };
+}
+
+function normalizeRecorderMode(mode) {
+  return mode === "inspect" ? "inspect" : "record";
 }
 
 function recordedAction(kind, fields) {
@@ -1238,6 +1427,20 @@ function typeText(selector, text, replace) {
     selector: selector || "",
     tag: element.tagName.toLowerCase(),
     textLength: text.length
+  };
+}
+
+function focusSelector(selector) {
+  const element = document.querySelector(selector);
+  if (!element) {
+    throw new Error(`No element matches selector: ${selector}`);
+  }
+
+  element.scrollIntoView({ block: "center", inline: "center", behavior: "auto" });
+  element.focus();
+  return {
+    selector,
+    tag: element.tagName.toLowerCase()
   };
 }
 

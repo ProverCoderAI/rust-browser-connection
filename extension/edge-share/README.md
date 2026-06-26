@@ -103,6 +103,12 @@ last selected tab or the active tab in the last focused window.
 - `list_tabs`: returns windows with nested tabs plus a flat `tabs` list. Window
   and tab metadata includes `regular`/`incognito` when Edge exposes it.
 - `activate_tab`: activates `tabId` or the current target tab.
+- `start_recording`, `stop_recording`, `clear_recording`, and
+  `recording_state`: control the user action recorder.
+- `set_recording_mode`: accepts `mode: "record"` or `mode: "inspect"`. Inspect
+  mode highlights elements and reports selectors without activating the page.
+- `play_recording`: replays the currently recorded steps through the same
+  shared browser debugger transport.
 
 `rbc <browser> pw` can run a Playwright-compatible subset against share links by
 translating supported `page` methods into these relay commands. Unsupported

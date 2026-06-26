@@ -8,6 +8,8 @@ const shareButton = document.getElementById("shareButton");
 const stopButton = document.getElementById("stopButton");
 const copyButton = document.getElementById("copyButton");
 const recordButton = document.getElementById("recordButton");
+const inspectButton = document.getElementById("inspectButton");
+const playRecordButton = document.getElementById("playRecordButton");
 const stopRecordButton = document.getElementById("stopRecordButton");
 const clearRecordButton = document.getElementById("clearRecordButton");
 const copyScriptButton = document.getElementById("copyScriptButton");
@@ -25,6 +27,8 @@ document.addEventListener("DOMContentLoaded", () => {
   stopButton.addEventListener("click", onStop);
   copyButton.addEventListener("click", onCopy);
   recordButton.addEventListener("click", onRecord);
+  inspectButton.addEventListener("click", onInspect);
+  playRecordButton.addEventListener("click", onPlayRecord);
   stopRecordButton.addEventListener("click", onStopRecord);
   clearRecordButton.addEventListener("click", onClearRecord);
   copyScriptButton.addEventListener("click", onCopyScript);
@@ -36,6 +40,9 @@ document.addEventListener("DOMContentLoaded", () => {
 chrome.runtime.onMessage.addListener((message) => {
   if (message && message.type === "state_changed") {
     renderState(message.state);
+  }
+  if (message && message.type === "recording_state_changed") {
+    renderRecording(message.recording);
   }
 });
 
@@ -94,7 +101,39 @@ async function onRecord() {
   clearError();
 
   try {
-    const response = await sendMessage({ type: "start_recording" });
+    const response = currentRecording && currentRecording.recording
+      ? await sendMessage({ type: "set_recording_mode", mode: "record" })
+      : await sendMessage({ type: "start_recording", params: { mode: "record" } });
+    renderRecording(response);
+  } catch (error) {
+    showError(error);
+  } finally {
+    setBusy(false);
+  }
+}
+
+async function onInspect() {
+  setBusy(true);
+  clearError();
+
+  try {
+    const response = currentRecording && currentRecording.recording
+      ? await sendMessage({ type: "set_recording_mode", mode: "inspect" })
+      : await sendMessage({ type: "start_recording", params: { mode: "inspect" } });
+    renderRecording(response);
+  } catch (error) {
+    showError(error);
+  } finally {
+    setBusy(false);
+  }
+}
+
+async function onPlayRecord() {
+  setBusy(true);
+  clearError();
+
+  try {
+    const response = await sendMessage({ type: "play_recording" });
     renderRecording(response);
   } catch (error) {
     showError(error);
@@ -191,9 +230,15 @@ function renderState(state) {
 function renderRecording(recording) {
   currentRecording = recording || {};
   const count = currentRecording.count || 0;
-  recordingStatus.textContent = currentRecording.recording ? `recording ${count}` : `idle ${count}`;
+  const mode = currentRecording.mode === "inspect" ? "inspect" : "record";
+  recordingStatus.textContent = currentRecording.playing
+    ? `playing ${count}`
+    : currentRecording.recording ? `${mode} ${count}` : `idle ${count}`;
   recordingStatus.classList.toggle("active", !!currentRecording.recording);
   recordedScript.value = currentRecording.script || "";
+  recordButton.classList.toggle("primary", mode === "record");
+  inspectButton.classList.toggle("primary", mode === "inspect");
+  playRecordButton.disabled = !!currentRecording.playing || count === 0;
   stopRecordButton.disabled = !currentRecording.recording;
   clearRecordButton.disabled = count === 0 && !currentRecording.recording;
   copyScriptButton.disabled = !recordedScript.value.trim();
@@ -228,6 +273,8 @@ function setBusy(busy) {
   stopButton.disabled = busy || !(currentState && currentState.sharing);
   copyButton.disabled = busy || !(currentState && currentState.shareUrl);
   recordButton.disabled = busy;
+  inspectButton.disabled = busy;
+  playRecordButton.disabled = busy || !(currentRecording && currentRecording.count > 0) || !!(currentRecording && currentRecording.playing);
   stopRecordButton.disabled = busy || !(currentRecording && currentRecording.recording);
   clearRecordButton.disabled = busy || !(currentRecording && (currentRecording.count || currentRecording.recording));
   copyScriptButton.disabled = busy || !recordedScript.value.trim();

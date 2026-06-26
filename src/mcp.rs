@@ -345,6 +345,13 @@ impl McpRuntime {
         SharedBrowserClient::new(share_url).start_recording()
     }
 
+    fn set_shared_recording_mode_from_panel(&self, mode: &str) -> Result<Value> {
+        let share_url = self
+            .active_share_url()
+            .ok_or_else(|| anyhow!("active browser is not a shared-extension browser"))?;
+        SharedBrowserClient::new(share_url).set_recording_mode(mode)
+    }
+
     fn stop_shared_recording_from_panel(&self) -> Result<Value> {
         let share_url = self
             .active_share_url()
@@ -357,6 +364,13 @@ impl McpRuntime {
             .active_share_url()
             .ok_or_else(|| anyhow!("active browser is not a shared-extension browser"))?;
         SharedBrowserClient::new(share_url).clear_recording()
+    }
+
+    fn play_shared_recording_from_panel(&self) -> Result<Value> {
+        let share_url = self
+            .active_share_url()
+            .ok_or_else(|| anyhow!("active browser is not a shared-extension browser"))?;
+        SharedBrowserClient::new(share_url).play_recording()
     }
 
     fn managed_cdp_endpoint(&mut self) -> Result<String> {

@@ -244,6 +244,26 @@ fn route_request(
             }
             recording_response(runtime, "start")
         }
+        ("POST", "/api/recording/record") | ("GET", "/api/recording/record") => {
+            if !has_valid_control_token(request, control_token) {
+                return json_response(
+                    403,
+                    "Forbidden",
+                    json!({ "error": "invalid control token" }),
+                );
+            }
+            recording_response(runtime, "record")
+        }
+        ("POST", "/api/recording/inspect") | ("GET", "/api/recording/inspect") => {
+            if !has_valid_control_token(request, control_token) {
+                return json_response(
+                    403,
+                    "Forbidden",
+                    json!({ "error": "invalid control token" }),
+                );
+            }
+            recording_response(runtime, "inspect")
+        }
         ("POST", "/api/recording/stop") | ("GET", "/api/recording/stop") => {
             if !has_valid_control_token(request, control_token) {
                 return json_response(
@@ -263,6 +283,16 @@ fn route_request(
                 );
             }
             recording_response(runtime, "clear")
+        }
+        ("POST", "/api/recording/play") | ("GET", "/api/recording/play") => {
+            if !has_valid_control_token(request, control_token) {
+                return json_response(
+                    403,
+                    "Forbidden",
+                    json!({ "error": "invalid control token" }),
+                );
+            }
+            recording_response(runtime, "play")
         }
         ("POST", "/api/share") | ("GET", "/api/share") => {
             if !has_valid_control_token(request, control_token) {
@@ -382,8 +412,11 @@ fn recording_response(runtime: Arc<Mutex<McpRuntime>>, action: &str) -> HttpResp
         .and_then(|runtime| match action {
             "state" => runtime.shared_recording_state_from_panel(),
             "start" => runtime.start_shared_recording_from_panel(),
+            "record" => runtime.set_shared_recording_mode_from_panel("record"),
+            "inspect" => runtime.set_shared_recording_mode_from_panel("inspect"),
             "stop" => runtime.stop_shared_recording_from_panel(),
             "clear" => runtime.clear_shared_recording_from_panel(),
+            "play" => runtime.play_shared_recording_from_panel(),
             _ => Err(anyhow!("unknown recording action")),
         });
     match result {

@@ -6,6 +6,13 @@ const SOURCE_RECORDER = "browser-connection:recorder";
 const RECORDER_OVERLAY_ID = "browser-connection-recorder-overlay";
 const RECORDER_OVERLAY_STORAGE_KEY = "browserConnectionRecorderOverlay";
 
+let currentRecorderState = {
+  recording: false,
+  mode: "record"
+};
+let lastInspectSentAt = 0;
+let lastInspectSelector = "";
+
 injectProvider();
 installRecorder();
 installRecorderOverlay();
@@ -76,8 +83,19 @@ function postResponse(id, ok, result, error) {
 function installRecorder() {
   const pendingInputs = new Map();
 
+  document.addEventListener("mousemove", (event) => {
+    if (isRecorderOverlayEvent(event) || !isInspectMode()) return;
+    inspectEventTarget(event, false);
+  }, true);
+
   document.addEventListener("click", (event) => {
     if (isRecorderOverlayEvent(event)) return;
+    if (isInspectMode()) {
+      inspectEventTarget(event, true);
+      event.preventDefault();
+      event.stopPropagation();
+      return;
+    }
     const target = closestRecordableElement(event.target);
     if (!target) return;
     recordAction({
@@ -89,7 +107,7 @@ function installRecorder() {
   }, true);
 
   document.addEventListener("input", (event) => {
-    if (isRecorderOverlayEvent(event)) return;
+    if (isRecorderOverlayEvent(event) || isInspectMode()) return;
     const target = closestRecordableElement(event.target);
     if (!target || !isEditable(target)) return;
     const selector = bestSelector(target);
@@ -101,7 +119,7 @@ function installRecorder() {
   }, true);
 
   document.addEventListener("change", (event) => {
-    if (isRecorderOverlayEvent(event)) return;
+    if (isRecorderOverlayEvent(event) || isInspectMode()) return;
     const target = closestRecordableElement(event.target);
     if (!target || !isEditable(target)) return;
     recordFill(target);
@@ -109,6 +127,13 @@ function installRecorder() {
 
   document.addEventListener("keydown", (event) => {
     if (isRecorderOverlayEvent(event)) return;
+    if (isInspectMode()) {
+      if (event.key === "Escape") {
+        hideInspectorHighlight();
+        sendRuntimeMessage({ type: "set_recording_mode", mode: "record" }).catch(() => {});
+      }
+      return;
+    }
     if (!shouldRecordKey(event)) return;
     const target = closestRecordableElement(event.target);
     recordAction({
@@ -123,6 +148,82 @@ function installRecorder() {
   window.addEventListener("pageshow", () => {
     recordAction({ kind: "navigate" });
   });
+}
+
+function isInspectMode() {
+  return !!currentRecorderState.recording && currentRecorderState.mode === "inspect";
+}
+
+function inspectEventTarget(event, commit) {
+  const target = closestRecordableElement(event.target) || elementFromEvent(event);
+  if (!target) return;
+  showInspectorHighlight(target);
+  sendInspectTarget(target, commit);
+}
+
+function elementFromEvent(event) {
+  if (event.target && event.target.nodeType === Node.ELEMENT_NODE) {
+    return event.target;
+  }
+  return null;
+}
+
+function sendInspectTarget(element, force) {
+  const selector = bestSelector(element);
+  const now = Date.now();
+  if (!force && selector === lastInspectSelector && now - lastInspectSentAt < 400) {
+    return;
+  }
+  if (!force && now - lastInspectSentAt < 160) {
+    return;
+  }
+
+  lastInspectSentAt = now;
+  lastInspectSelector = selector;
+  chrome.runtime.sendMessage({
+    type: "inspect_target",
+    target: {
+      selector,
+      label: elementLabel(element),
+      tag: element.tagName.toLowerCase(),
+      url: location.href,
+      title: document.title || ""
+    }
+  }, () => {
+    void chrome.runtime.lastError;
+  });
+}
+
+function showInspectorHighlight(element) {
+  const rect = element.getBoundingClientRect();
+  if (rect.width <= 0 || rect.height <= 0) return;
+
+  let highlight = document.getElementById(`${RECORDER_OVERLAY_ID}-highlight`);
+  if (!highlight) {
+    highlight = document.createElement("div");
+    highlight.id = `${RECORDER_OVERLAY_ID}-highlight`;
+    highlight.style.position = "fixed";
+    highlight.style.zIndex = "2147483646";
+    highlight.style.pointerEvents = "none";
+    highlight.style.border = "2px solid #35b184";
+    highlight.style.borderRadius = "6px";
+    highlight.style.boxShadow = "0 0 0 4px rgba(53, 177, 132, 0.22)";
+    highlight.style.transition = "left 80ms ease, top 80ms ease, width 80ms ease, height 80ms ease";
+    document.documentElement.appendChild(highlight);
+  }
+
+  highlight.style.left = `${Math.max(0, rect.left)}px`;
+  highlight.style.top = `${Math.max(0, rect.top)}px`;
+  highlight.style.width = `${rect.width}px`;
+  highlight.style.height = `${rect.height}px`;
+  highlight.style.display = "block";
+}
+
+function hideInspectorHighlight() {
+  const highlight = document.getElementById(`${RECORDER_OVERLAY_ID}-highlight`);
+  if (highlight) {
+    highlight.style.display = "none";
+  }
 }
 
 function installRecorderOverlay() {
@@ -210,7 +311,7 @@ function createRecorderOverlay(overlay) {
 
       .panel,
       .pill {
-        width: 292px;
+        width: 344px;
         color: #e6edf3;
         border: 1px solid #3a4656;
         border-radius: 10px;
@@ -296,9 +397,102 @@ function createRecorderOverlay(overlay) {
         color: #b8c7dc;
       }
 
+      .mode-switch {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 6px;
+        padding: 3px;
+        border: 1px solid #2b3543;
+        border-radius: 8px;
+        background: #0b1018;
+      }
+
+      .mode-button {
+        min-height: 30px;
+        border-color: transparent;
+        background: transparent;
+      }
+
+      .mode-button.active {
+        border-color: #35b184;
+        color: #d9fff0;
+        background: rgba(53, 177, 132, 0.2);
+      }
+
+      .inspect-target,
+      .steps {
+        display: grid;
+        gap: 6px;
+        max-height: 132px;
+        overflow: auto;
+        padding: 8px;
+        border: 1px solid #2b3543;
+        border-radius: 8px;
+        background: #0b1018;
+      }
+
+      .inspect-target {
+        display: none;
+      }
+
+      .inspect-target.visible {
+        display: grid;
+      }
+
+      .label {
+        color: #8ea2bd;
+        font-size: 11px;
+        font-weight: 800;
+        text-transform: uppercase;
+      }
+
+      .selector,
+      .empty,
+      .step-selector {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .selector {
+        color: #f8fafc;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        font-size: 12px;
+      }
+
+      .empty {
+        color: #8ea2bd;
+      }
+
+      .step {
+        display: grid;
+        grid-template-columns: auto minmax(0, 1fr);
+        gap: 8px;
+        align-items: center;
+        min-width: 0;
+      }
+
+      .step-kind {
+        min-width: 54px;
+        color: #d9fff0;
+        font-size: 11px;
+        font-weight: 800;
+        text-transform: uppercase;
+      }
+
+      .step-selector {
+        color: #c8d7eb;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        font-size: 11px;
+      }
+
+      .step.playing .step-selector {
+        color: #ffffff;
+      }
+
       .actions {
         display: grid;
-        grid-template-columns: 1fr 1fr 1fr;
+        grid-template-columns: 1fr 1fr 1fr 1fr;
         gap: 8px;
       }
 
@@ -319,6 +513,11 @@ function createRecorderOverlay(overlay) {
       button.copied {
         border-color: #35b184;
         color: #d9fff0;
+      }
+
+      button:disabled {
+        cursor: not-allowed;
+        opacity: 0.55;
       }
 
       .pill {
@@ -353,8 +552,20 @@ function createRecorderOverlay(overlay) {
         <button class="icon-button" id="minimizeButton" type="button" title="Minimize">-</button>
       </div>
       <div class="body">
-        <p class="hint">User actions are being recorded for the agent.</p>
+        <div class="mode-switch" aria-label="Recorder mode">
+          <button class="mode-button active" id="recordModeButton" type="button">Record</button>
+          <button class="mode-button" id="inspectModeButton" type="button">Inspect</button>
+        </div>
+        <p class="hint" id="hintText">User actions are being recorded for the agent.</p>
+        <div class="inspect-target" id="inspectTarget">
+          <div class="label">Selector</div>
+          <div class="selector" id="inspectSelector">Hover an element</div>
+        </div>
+        <div class="steps" id="stepsList">
+          <div class="empty">No recorded steps yet.</div>
+        </div>
         <div class="actions">
+          <button id="playButton" type="button">Play</button>
           <button class="primary" id="stopButton" type="button">Stop</button>
           <button id="clearButton" type="button">Clear</button>
           <button id="copyButton" type="button">Copy</button>
@@ -371,9 +582,36 @@ function createRecorderOverlay(overlay) {
   overlay.shadow = shadow;
   document.documentElement.appendChild(host);
 
+  shadow.getElementById("recordModeButton").addEventListener("click", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    hideInspectorHighlight();
+    sendRuntimeMessage({ type: "set_recording_mode", mode: "record" })
+      .then((recording) => renderRecorderOverlay(overlay, recording))
+      .catch(() => refreshRecorderOverlay(overlay));
+  });
+
+  shadow.getElementById("inspectModeButton").addEventListener("click", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    sendRuntimeMessage({ type: "set_recording_mode", mode: "inspect" })
+      .then((recording) => renderRecorderOverlay(overlay, recording))
+      .catch(() => refreshRecorderOverlay(overlay));
+  });
+
+  shadow.getElementById("playButton").addEventListener("click", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    hideInspectorHighlight();
+    sendRuntimeMessage({ type: "play_recording" })
+      .then((recording) => renderRecorderOverlay(overlay, recording))
+      .catch(() => refreshRecorderOverlay(overlay));
+  });
+
   shadow.getElementById("stopButton").addEventListener("click", (event) => {
     event.preventDefault();
     event.stopPropagation();
+    hideInspectorHighlight();
     sendRuntimeMessage({ type: "stop_recording" })
       .then((recording) => renderRecorderOverlay(overlay, recording))
       .catch(() => refreshRecorderOverlay(overlay));
@@ -439,6 +677,10 @@ function renderRecorderOverlay(overlay, recording) {
     ...overlay.state,
     ...(recording || {})
   };
+  currentRecorderState = {
+    recording: !!overlay.state.recording,
+    mode: overlay.state.mode || "record"
+  };
 
   const recordingActive = !!overlay.state.recording;
   overlay.host.style.display = recordingActive ? "block" : "none";
@@ -446,8 +688,65 @@ function renderRecorderOverlay(overlay, recording) {
 
   const count = Number(overlay.state.count || 0);
   const label = `${count} ${count === 1 ? "action" : "actions"}`;
-  overlay.shadow.getElementById("statusText").textContent = `Recording ${label}`;
+  const mode = overlay.state.mode === "inspect" ? "inspect" : "record";
+  const playing = !!overlay.state.playing;
+  overlay.shadow.getElementById("statusText").textContent = playing
+    ? `Playing ${label}`
+    : mode === "inspect"
+      ? `Inspecting ${label}`
+      : `Recording ${label}`;
   overlay.shadow.getElementById("pillText").textContent = `REC ${count}`;
+  overlay.shadow.getElementById("hintText").textContent = mode === "inspect"
+    ? "Hover elements to preview selectors. Click captures the selector without activating the page."
+    : "User actions are being recorded for the agent.";
+
+  overlay.shadow.getElementById("recordModeButton").classList.toggle("active", mode === "record");
+  overlay.shadow.getElementById("inspectModeButton").classList.toggle("active", mode === "inspect");
+  overlay.shadow.getElementById("playButton").disabled = playing || count === 0;
+  overlay.shadow.getElementById("clearButton").disabled = playing || count === 0;
+  overlay.shadow.getElementById("copyButton").disabled = !String(overlay.state.script || "").trim();
+
+  const inspectTarget = overlay.shadow.getElementById("inspectTarget");
+  const inspect = overlay.state.lastInspect || null;
+  inspectTarget.classList.toggle("visible", mode === "inspect");
+  overlay.shadow.getElementById("inspectSelector").textContent = inspect?.selector || "Hover an element";
+  renderOverlaySteps(overlay);
+  if (mode !== "inspect") {
+    hideInspectorHighlight();
+  }
+}
+
+function renderOverlaySteps(overlay) {
+  const steps = Array.isArray(overlay.state.actions) ? overlay.state.actions : [];
+  const list = overlay.shadow.getElementById("stepsList");
+  const visible = steps.slice(-6).reverse();
+  if (visible.length === 0) {
+    list.replaceChildren(createShadowElement(overlay.shadow, "div", "empty", "No recorded steps yet."));
+    return;
+  }
+
+  list.replaceChildren(...visible.map((action) => {
+    const row = createShadowElement(overlay.shadow, "div", `step${action.id && action.id === overlay.state.playbackStepId ? " playing" : ""}`, "");
+    row.appendChild(createShadowElement(overlay.shadow, "span", "step-kind", action.kind || "step"));
+    row.appendChild(createShadowElement(overlay.shadow, "span", "step-selector", recordedActionLabel(action)));
+    return row;
+  }));
+}
+
+function createShadowElement(shadow, tag, className, text) {
+  const element = document.createElement(tag);
+  if (className) {
+    element.className = className;
+  }
+  element.textContent = text;
+  return element;
+}
+
+function recordedActionLabel(action) {
+  if (action.selector) return action.selector;
+  if (action.url) return action.url;
+  if (action.key) return action.key;
+  return action.title || "-";
 }
 
 function beginOverlayDrag(event, overlay) {

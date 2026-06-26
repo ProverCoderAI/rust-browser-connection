@@ -855,6 +855,8 @@ label {
             <p class="panel-note">Start recording here or in the extension. A floating recorder stays visible on supported Edge pages.</p>
             <div class="recorder-controls">
               <button id="startRecordingButton" class="small-button" type="button">Record</button>
+              <button id="inspectRecordingButton" class="secondary-button small-button" type="button">Inspect</button>
+              <button id="playRecordingButton" class="secondary-button small-button" type="button">Play</button>
               <button id="stopRecordingButton" class="secondary-button small-button" type="button">Stop</button>
               <button id="clearRecordingButton" class="secondary-button small-button" type="button">Clear</button>
               <button id="copyRecordingButton" class="secondary-button small-button" type="button">Copy script</button>
@@ -1223,10 +1225,16 @@ function renderEvents(events) {
 function renderRecording(recording) {
   latestRecording = recording || {};
   const actions = latestRecording.actions || [];
+  const mode = latestRecording.mode === "inspect" ? "inspect" : "record";
   const badge = document.getElementById("recordingBadge");
-  badge.textContent = latestRecording.recording ? "recording " + actions.length : "idle " + actions.length;
+  badge.textContent = latestRecording.playing
+    ? "playing " + actions.length
+    : latestRecording.recording ? mode + " " + actions.length : "idle " + actions.length;
   badge.className = "tag" + (latestRecording.recording ? " badge-ok" : "");
   document.getElementById("recordedScript").value = latestRecording.script || "";
+  document.getElementById("startRecordingButton").classList.toggle("secondary-button", mode !== "record");
+  document.getElementById("inspectRecordingButton").classList.toggle("secondary-button", mode !== "inspect");
+  document.getElementById("playRecordingButton").disabled = latestRecording.playing || actions.length === 0;
   document.getElementById("stopRecordingButton").disabled = !latestRecording.recording;
   document.getElementById("clearRecordingButton").disabled = !latestRecording.recording && actions.length === 0;
   document.getElementById("copyRecordingButton").disabled = !(latestRecording.script || "").trim();
@@ -1237,15 +1245,23 @@ function renderRecording(recording) {
     return;
   }
   if (!actions.length) {
-    list.replaceChildren(el("div", { className: "empty-list" }, "Press Record, then use any http/https tab in this Edge profile."));
+    const inspect = latestRecording.lastInspect?.selector ? " Inspect target: " + latestRecording.lastInspect.selector : "";
+    list.replaceChildren(el("div", { className: "empty-list" }, "Press Record, then use any http/https tab in this Edge profile." + inspect));
     return;
   }
-  list.replaceChildren(...actions.slice(-12).reverse().map(action => {
+  const rows = actions.slice(-12).reverse().map(action => {
     const row = el("div", { className: "recorded-action" });
     row.appendChild(el("strong", {}, action.kind || "action"));
     row.appendChild(el("span", { title: recordedActionText(action) }, recordedActionText(action)));
     return row;
-  }));
+  });
+  if (latestRecording.lastInspect?.selector) {
+    const row = el("div", { className: "recorded-action" });
+    row.appendChild(el("strong", {}, "inspect"));
+    row.appendChild(el("span", { title: latestRecording.lastInspect.selector }, latestRecording.lastInspect.selector));
+    rows.unshift(row);
+  }
+  list.replaceChildren(...rows);
 }
 
 function recordedActionText(action) {
@@ -1475,7 +1491,13 @@ document.getElementById("eventSearch").addEventListener("input", event => {
 document.getElementById("expandAllButton").addEventListener("click", expandAllWindows);
 document.getElementById("collapseAllButton").addEventListener("click", collapseAllWindows);
 document.getElementById("startRecordingButton").addEventListener("click", () => {
-  setRecording("start").catch(error => console.error(error));
+  setRecording(latestRecording?.recording ? "record" : "start").catch(error => console.error(error));
+});
+document.getElementById("inspectRecordingButton").addEventListener("click", () => {
+  setRecording("inspect").catch(error => console.error(error));
+});
+document.getElementById("playRecordingButton").addEventListener("click", () => {
+  setRecording("play").catch(error => console.error(error));
 });
 document.getElementById("stopRecordingButton").addEventListener("click", () => {
   setRecording("stop").catch(error => console.error(error));
