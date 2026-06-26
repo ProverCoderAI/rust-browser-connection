@@ -1,0 +1,149 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <title>Connect Edge</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+        font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        font-size: 14px;
+      }
+
+      body {
+        margin: 0;
+        color: #1f2328;
+        background: #ffffff;
+      }
+
+      main {
+        display: grid;
+        gap: 14px;
+        padding: 18px;
+      }
+
+      h1 {
+        margin: 0;
+        font-size: 18px;
+        font-weight: 650;
+      }
+
+      .details {
+        display: grid;
+        gap: 10px;
+        border: 1px solid #d0d7de;
+        border-radius: 8px;
+        padding: 12px;
+        background: #f6f8fa;
+      }
+
+      .row {
+        display: grid;
+        gap: 3px;
+      }
+
+      .label {
+        color: #57606a;
+        font-size: 12px;
+        font-weight: 650;
+        text-transform: uppercase;
+      }
+
+      .value {
+        overflow-wrap: anywhere;
+      }
+
+      .actions {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 10px;
+      }
+
+      button {
+        min-height: 38px;
+        border: 1px solid #d0d7de;
+        border-radius: 6px;
+        padding: 8px 10px;
+        font: inherit;
+        font-weight: 650;
+        color: #24292f;
+        background: #f6f8fa;
+        cursor: pointer;
+      }
+
+      button.primary {
+        color: #ffffff;
+        border-color: #0969da;
+        background: #0969da;
+      }
+
+      button:disabled {
+        cursor: not-allowed;
+        opacity: 0.55;
+      }
+
+      .status {
+        min-height: 20px;
+        color: #57606a;
+        line-height: 1.4;
+      }
+
+      .error {
+        color: #cf222e;
+      }
+
+      @media (prefers-color-scheme: dark) {
+        body {
+          color: #e6edf3;
+          background: #0d1117;
+        }
+
+        .details,
+        button {
+          border-color: #30363d;
+          color: #e6edf3;
+          background: #161b22;
+        }
+
+        button.primary {
+          border-color: #1f6feb;
+          background: #1f6feb;
+        }
+
+        .label,
+        .status {
+          color: #8b949e;
+        }
+
+        .error {
+          color: #ff7b72;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Connect this Edge</h1>
+      <div class="details">
+        <div class="row">
+          <span class="label">Platform</span>
+          <span class="value" id="origin">-</span>
+        </div>
+        <div class="row">
+          <span class="label">Workspace</span>
+          <span class="value" id="workspace">-</span>
+        </div>
+        <div class="row">
+          <span class="label">Relay</span>
+          <span class="value" id="relay">-</span>
+        </div>
+      </div>
+      <div class="actions">
+        <button class="primary" id="approveButton" type="button">Connect</button>
+        <button id="rejectButton" type="button">Cancel</button>
+      </div>
+      <div class="status" id="status">Loading request</div>
+    </main>
+    <script src="connect.js"></script>
+  </body>
+</html>
