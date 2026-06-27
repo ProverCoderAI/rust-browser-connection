@@ -955,11 +955,12 @@ async function commandRunPlaywright(params = {}) {
 
   try {
     const app = normalizeCrxApplication(await globalThis.getCrxApp(!!tab.incognito));
-    if (!app || typeof app.attach !== "function" || typeof app.run !== "function") {
-      throw new Error(`Playwright CRX application does not expose attach/run: ${describeCrxApplication(app)}`);
+    const runPlaywright = crxRunFunction(app);
+    if (!app || typeof app.attach !== "function" || typeof runPlaywright !== "function") {
+      throw new Error(`Playwright CRX application does not expose attach/run or recorder.run: ${describeCrxApplication(app)}`);
     }
     const page = await app.attach(tabId);
-    const run = app.run(code, page);
+    const run = runPlaywright(code, page);
     if (timeoutMs > 0) {
       await withTimeout(run, timeoutMs, "run_playwright");
     } else {
@@ -979,14 +980,14 @@ async function commandRunPlaywright(params = {}) {
 }
 
 function normalizeCrxApplication(app) {
-  if (app && typeof app.attach === "function" && typeof app.run === "function") {
+  if (app && typeof app.attach === "function" && typeof crxRunFunction(app) === "function") {
     return app;
   }
   if (
     app &&
     app.crxApplication &&
     typeof app.crxApplication.attach === "function" &&
-    typeof app.crxApplication.run === "function"
+    typeof crxRunFunction(app.crxApplication) === "function"
   ) {
     return app.crxApplication;
   }
@@ -994,21 +995,40 @@ function normalizeCrxApplication(app) {
     app &&
     app._object &&
     typeof app._object.attach === "function" &&
-    typeof app._object.run === "function"
+    typeof crxRunFunction(app._object) === "function"
   ) {
     return app._object;
   }
   return app;
 }
 
+function crxRunFunction(app) {
+  if (!app || typeof app !== "object") {
+    return null;
+  }
+  if (typeof app.run === "function") {
+    return app.run.bind(app);
+  }
+  if (app.recorder && typeof app.recorder.run === "function") {
+    return app.recorder.run.bind(app.recorder);
+  }
+  if (app._object) {
+    return crxRunFunction(app._object);
+  }
+  return null;
+}
+
 function describeCrxApplication(app) {
   if (!app || typeof app !== "object") {
     return String(app);
   }
-  const keys = Object.keys(app).slice(0, 20).join(",") || "no enumerable keys";
+  const keys = Object.keys(app).slice(0, 40).join(",") || "no enumerable keys";
   const proto = Object.getPrototypeOf(app);
-  const protoKeys = proto ? Object.getOwnPropertyNames(proto).slice(0, 20).join(",") : "no prototype";
-  return `keys=[${keys}] proto=[${protoKeys}]`;
+  const protoKeys = proto ? Object.getOwnPropertyNames(proto).slice(0, 40).join(",") : "no prototype";
+  const recorder = app.recorder && typeof app.recorder === "object"
+    ? ` recorderKeys=[${Object.keys(app.recorder).slice(0, 20).join(",") || "no enumerable keys"}]`
+    : "";
+  return `keys=[${keys}] proto=[${protoKeys}]${recorder}`;
 }
 
 async function startRecording(params = {}) {
