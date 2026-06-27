@@ -143481,4 +143481,4 @@ chrome.runtime.onInstalled.addListener((details) => {
   void details;
 });
 Object.assign(self, { attach, setTestIdAttributeName, getCrxApp, _debug: debug, _setUnderTest: setUnderTest });
-import("./edge_share_relay.js").catch((error) => console.error(error));
+import "./edge_share_relay.js";
