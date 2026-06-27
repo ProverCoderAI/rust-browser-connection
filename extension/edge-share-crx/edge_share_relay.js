@@ -884,9 +884,9 @@ async function commandRunPlaywright(params = {}) {
     : 0;
 
   try {
-    const app = await globalThis.getCrxApp(!!tab.incognito);
+    const app = normalizeCrxApplication(await globalThis.getCrxApp(!!tab.incognito));
     if (!app || typeof app.attach !== "function" || typeof app.run !== "function") {
-      throw new Error("Playwright CRX application does not expose attach/run");
+      throw new Error(`Playwright CRX application does not expose attach/run: ${describeCrxApplication(app)}`);
     }
     const page = await app.attach(tabId);
     const run = app.run(code, page);
@@ -906,6 +906,39 @@ async function commandRunPlaywright(params = {}) {
     await persistState({ lastError: errorMessage(error) }).catch(reportError);
     throw error;
   }
+}
+
+function normalizeCrxApplication(app) {
+  if (app && typeof app.attach === "function" && typeof app.run === "function") {
+    return app;
+  }
+  if (
+    app &&
+    app.crxApplication &&
+    typeof app.crxApplication.attach === "function" &&
+    typeof app.crxApplication.run === "function"
+  ) {
+    return app.crxApplication;
+  }
+  if (
+    app &&
+    app._object &&
+    typeof app._object.attach === "function" &&
+    typeof app._object.run === "function"
+  ) {
+    return app._object;
+  }
+  return app;
+}
+
+function describeCrxApplication(app) {
+  if (!app || typeof app !== "object") {
+    return String(app);
+  }
+  const keys = Object.keys(app).slice(0, 20).join(",") || "no enumerable keys";
+  const proto = Object.getPrototypeOf(app);
+  const protoKeys = proto ? Object.getOwnPropertyNames(proto).slice(0, 20).join(",") : "no prototype";
+  return `keys=[${keys}] proto=[${protoKeys}]`;
 }
 
 async function startRecording(params = {}) {
