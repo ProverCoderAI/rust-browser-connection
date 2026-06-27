@@ -955,12 +955,12 @@ async function commandRunPlaywright(params = {}) {
 
   try {
     const app = normalizeCrxApplication(await globalThis.getCrxApp(!!tab.incognito));
-    const runPlaywright = crxRunFunction(app);
-    if (!app || typeof app.attach !== "function" || typeof runPlaywright !== "function") {
+    const runner = crxRunner(app);
+    if (!app || typeof app.attach !== "function" || typeof runner.run !== "function") {
       throw new Error(`Playwright CRX application does not expose attach/run or recorder.run: ${describeCrxApplication(app)}`);
     }
     const page = await app.attach(tabId);
-    const run = runPlaywright(code, page);
+    const run = runner.acceptsPage ? runner.run(code, page) : runner.run(code);
     if (timeoutMs > 0) {
       await withTimeout(run, timeoutMs, "run_playwright");
     } else {
@@ -980,14 +980,14 @@ async function commandRunPlaywright(params = {}) {
 }
 
 function normalizeCrxApplication(app) {
-  if (app && typeof app.attach === "function" && typeof crxRunFunction(app) === "function") {
+  if (app && typeof app.attach === "function" && typeof crxRunner(app).run === "function") {
     return app;
   }
   if (
     app &&
     app.crxApplication &&
     typeof app.crxApplication.attach === "function" &&
-    typeof crxRunFunction(app.crxApplication) === "function"
+    typeof crxRunner(app.crxApplication).run === "function"
   ) {
     return app.crxApplication;
   }
@@ -995,27 +995,27 @@ function normalizeCrxApplication(app) {
     app &&
     app._object &&
     typeof app._object.attach === "function" &&
-    typeof crxRunFunction(app._object) === "function"
+    typeof crxRunner(app._object).run === "function"
   ) {
     return app._object;
   }
   return app;
 }
 
-function crxRunFunction(app) {
+function crxRunner(app) {
   if (!app || typeof app !== "object") {
-    return null;
+    return { run: null, acceptsPage: false };
   }
   if (typeof app.run === "function") {
-    return app.run.bind(app);
+    return { run: app.run.bind(app), acceptsPage: true };
   }
   if (app.recorder && typeof app.recorder.run === "function") {
-    return app.recorder.run.bind(app.recorder);
+    return { run: app.recorder.run.bind(app.recorder), acceptsPage: false };
   }
   if (app._object) {
-    return crxRunFunction(app._object);
+    return crxRunner(app._object);
   }
-  return null;
+  return { run: null, acceptsPage: false };
 }
 
 function describeCrxApplication(app) {

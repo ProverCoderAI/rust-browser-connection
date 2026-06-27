@@ -1,6 +1,6 @@
 {
   "name": "Browser Connection Playwright CRX",
-  "version": "0.15.1",
+  "version": "0.15.2",
   "description": "Playwright CRX recorder integrated with browser-connection relay sharing.",
   "manifest_version": 3,
   "icons": {
