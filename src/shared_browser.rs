@@ -18,6 +18,7 @@ use std::thread;
 use std::time::Duration;
 use tungstenite::handshake::server::{Callback, ErrorResponse, Request, Response};
 use tungstenite::protocol::WebSocketConfig;
+use tungstenite::stream::MaybeTlsStream;
 use tungstenite::{accept_hdr_with_config, connect, Error as WsError, Message, WebSocket};
 
 pub const DEFAULT_RELAY_BIND: &str = "127.0.0.1:8765";
@@ -25,6 +26,7 @@ pub const MAX_SESSION_ID_BYTES: usize = 128;
 pub const MAX_TOKEN_BYTES: usize = 512;
 pub const MAX_JSON_MESSAGE_BYTES: usize = 8 * 1024 * 1024;
 pub const MAX_SESSIONS: usize = 1024;
+pub const SHARED_BROWSER_COMMAND_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RelayConfig {
@@ -261,6 +263,7 @@ impl SharedBrowserClient {
         let (mut socket, _) = connect(&websocket_url).with_context(|| {
             format!("failed to connect to shared browser relay {websocket_url}")
         })?;
+        set_agent_socket_timeouts(&mut socket);
         let request = json!({ "id": 1, "command": command, "params": params });
         socket
             .send(Message::Text(request.to_string()))
@@ -300,6 +303,22 @@ impl SharedBrowserClient {
                 _ => {}
             }
         }
+    }
+}
+
+fn set_agent_socket_timeouts(socket: &mut WebSocket<MaybeTlsStream<TcpStream>>) {
+    let stream = socket.get_mut();
+    match stream {
+        MaybeTlsStream::Plain(stream) => {
+            let _ = stream.set_read_timeout(Some(SHARED_BROWSER_COMMAND_TIMEOUT));
+            let _ = stream.set_write_timeout(Some(SHARED_BROWSER_COMMAND_TIMEOUT));
+        }
+        MaybeTlsStream::NativeTls(stream) => {
+            let stream = stream.get_mut();
+            let _ = stream.set_read_timeout(Some(SHARED_BROWSER_COMMAND_TIMEOUT));
+            let _ = stream.set_write_timeout(Some(SHARED_BROWSER_COMMAND_TIMEOUT));
+        }
+        _ => {}
     }
 }
 
