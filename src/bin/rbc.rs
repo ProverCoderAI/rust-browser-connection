@@ -94,12 +94,12 @@ enum TopCommand {
     Tabs,
     /// Activate a tab by browser tab id.
     ActivateTab { tab_id: i64 },
-    /// Run Playwright JavaScript against a browser target.
+    /// Run Playwright code against a browser target.
     Pw {
-        /// JavaScript file body to run with playwright/browser/context/page in scope.
+        /// JavaScript file body for CDP targets, or Playwright CRX script for shared targets.
         #[arg(value_name = "SCRIPT", conflicts_with = "code")]
         script: Option<PathBuf>,
-        /// JavaScript body to run with playwright/browser/context/page in scope.
+        /// JavaScript body for CDP targets, or Playwright CRX actions for shared targets.
         #[arg(long, value_name = "JS", conflicts_with = "script")]
         code: Option<String>,
         /// Allow the script to close the shared browser/context.

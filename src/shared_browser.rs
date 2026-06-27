@@ -237,6 +237,13 @@ impl SharedBrowserClient {
         self.call("play_recording", json!({}))
     }
 
+    pub fn run_playwright(&self, code: &str, allow_close: bool) -> Result<Value> {
+        self.call(
+            "run_playwright",
+            json!({ "code": code, "allowClose": allow_close }),
+        )
+    }
+
     pub fn call_command(&self, command: &str, params: Value) -> Result<Value> {
         self.call(command, params)
     }

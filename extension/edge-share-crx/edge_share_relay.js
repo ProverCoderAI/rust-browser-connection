@@ -592,6 +592,20 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function withTimeout(promise, timeoutMs, label) {
+  let timer = null;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => {
+      reject(new Error(`${label} timed out after ${timeoutMs}ms`));
+    }, timeoutMs);
+  });
+  return Promise.race([promise, timeout]).finally(() => {
+    if (timer) {
+      clearTimeout(timer);
+    }
+  });
+}
+
 async function handleRelayMessage(rawData) {
   let message;
   try {
@@ -664,6 +678,9 @@ async function handleCommand(command, params) {
   }
   if (command === "activate_tab") {
     return commandActivateTab(params);
+  }
+  if (command === "run_playwright") {
+    return commandRunPlaywright(params);
   }
   if (command === "start_recording") {
     return startRecording(params);
@@ -834,6 +851,61 @@ async function commandActivateTab(params) {
   state.activeTabId = tab.id;
   await persistState({ activeTabId: tab.id });
   return { tab: tabSummary(tab) };
+}
+
+async function commandRunPlaywright(params = {}) {
+  if (!params || typeof params.code !== "string" || !params.code.trim()) {
+    throw new Error("run_playwright requires params.code");
+  }
+  if (typeof globalThis.getCrxApp !== "function") {
+    throw new Error("Playwright CRX runtime is not available in this extension build");
+  }
+  if (params.allowClose !== true && /\.\s*close\s*\(/.test(params.code)) {
+    throw new Error("run_playwright blocks close() by default; pass --allow-close to allow it");
+  }
+
+  let tabId = await getTargetTabId(params);
+  let tab = await chromeCall(chrome.tabs.get, chrome.tabs, tabId);
+  if (/^chrome:\/\//i.test(tab.url || "")) {
+    tab = await chromeCall(chrome.tabs.create, chrome.tabs, {
+      windowId: tab.windowId,
+      url: "about:blank",
+      active: true
+    });
+    tabId = tab.id;
+  }
+  if (!Number.isInteger(tabId)) {
+    throw new Error("run_playwright could not resolve a target tab");
+  }
+
+  const code = normalizePlaywrightCrxCode(params.code);
+  const timeoutMs = Number.isFinite(Number(params.timeoutMs))
+    ? clampNumber(params.timeoutMs, 1000, 10 * 60 * 1000)
+    : 0;
+
+  try {
+    const app = await globalThis.getCrxApp(!!tab.incognito);
+    if (!app || typeof app.attach !== "function" || typeof app.run !== "function") {
+      throw new Error("Playwright CRX application does not expose attach/run");
+    }
+    const page = await app.attach(tabId);
+    const run = app.run(code, page);
+    if (timeoutMs > 0) {
+      await withTimeout(run, timeoutMs, "run_playwright");
+    } else {
+      await run;
+    }
+    state.activeTabId = tabId;
+    await persistState({ activeTabId: tabId, lastError: "" });
+    return {
+      ok: true,
+      mode: "playwright-crx",
+      tab: await currentTabSummary(tabId)
+    };
+  } catch (error) {
+    await persistState({ lastError: errorMessage(error) }).catch(reportError);
+    throw error;
+  }
 }
 
 async function startRecording(params = {}) {
@@ -1177,7 +1249,9 @@ function upsertRecordedAction(actions, action) {
 
 function renderRecordedPlaywright(actions) {
   const lines = [
-    "module.exports = async ({ page }) => {"
+    "import { test, expect } from '@playwright/test';",
+    "",
+    "test('rbc recording', async ({ page }) => {"
   ];
   let previousTabId = null;
   for (const action of actions) {
@@ -1188,19 +1262,48 @@ function renderRecordedPlaywright(actions) {
     if (action.kind === "navigate" && action.url) {
       lines.push(`  await page.goto(${JSON.stringify(action.url)});`);
     } else if (action.kind === "click" && action.selector) {
-      lines.push(`  await page.click(${JSON.stringify(action.selector)});`);
+      lines.push(`  await page.locator(${JSON.stringify(action.selector)}).click();`);
     } else if (action.kind === "fill" && action.selector) {
-      lines.push(`  await page.fill(${JSON.stringify(action.selector)}, ${JSON.stringify(action.text || "")});`);
+      lines.push(`  await page.locator(${JSON.stringify(action.selector)}).fill(${JSON.stringify(action.text || "")});`);
     } else if (action.kind === "press" && action.key) {
       if (action.selector) {
-        lines.push(`  await page.press(${JSON.stringify(action.selector)}, ${JSON.stringify(action.key)});`);
+        lines.push(`  await page.locator(${JSON.stringify(action.selector)}).press(${JSON.stringify(action.key)});`);
       } else {
-        lines.push(`  await page.keyboard.press(${JSON.stringify(action.key)});`);
+        lines.push(`  await page.locator("body").press(${JSON.stringify(action.key)});`);
       }
     }
   }
-  lines.push("};");
+  lines.push("});");
   return lines.join("\n");
+}
+
+function normalizePlaywrightCrxCode(code) {
+  const source = String(code || "").trim();
+  if (!source) {
+    return source;
+  }
+  if (/\btest\s*\(/.test(source)) {
+    return source;
+  }
+
+  const moduleMatch = source.match(
+    /^module\.exports\s*=\s*async\s*\(\s*\{\s*page\s*\}\s*\)\s*=>\s*\{([\s\S]*)\}\s*;?\s*$/
+  );
+  const body = moduleMatch ? moduleMatch[1].trim() : source;
+  return [
+    "import { test, expect } from '@playwright/test';",
+    "",
+    "test('rbc', async ({ page }) => {",
+    indentPlaywrightBody(body),
+    "});"
+  ].join("\n");
+}
+
+function indentPlaywrightBody(body) {
+  return String(body || "")
+    .split(/\r?\n/)
+    .map((line) => (line.trim() ? `  ${line}` : ""))
+    .join("\n");
 }
 
 function isRecordableUrl(url) {

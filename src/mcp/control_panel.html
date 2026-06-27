@@ -902,6 +902,7 @@ const controlToken = "__CONTROL_TOKEN__";
 const edgeBrowserName = "edge";
 let lastActive = "";
 let autoConnectStarted = false;
+let autoReconnectStarted = false;
 let activityVisible = false;
 let collapsedWindows = loadCollapsedWindows();
 let lastWindows = [];
@@ -1044,18 +1045,32 @@ async function registerShare(name, shareUrl) {
 }
 
 function maybeAutoConnectEdge() {
-  if (autoConnectStarted) return;
-  autoConnectStarted = true;
   if (!window.browserConnection || typeof window.browserConnection.request !== "function") {
     setConnectStatus("Install or enable Edge Share extension to connect this Edge.");
     return;
   }
+  if (autoConnectStarted) return;
+  autoConnectStarted = true;
   const key = "browserConnectionAutoConnect:" + window.location.origin + window.location.pathname;
   if (sessionStorage.getItem(key) === "1" && edgeIsRegistered()) {
     setConnectStatus("Edge Share extension detected.");
     return;
   }
   sessionStorage.setItem(key, "1");
+  connectEdge(true).catch(error => setConnectStatus(error.message || String(error)));
+}
+
+function maybeReconnectEdgeAfterTabsError(error) {
+  if (!error || autoReconnectStarted) return;
+  const active = (latestInventory?.browsers || []).find(browser => browser.active) || null;
+  if (active?.kind !== "shared-extension" || active.name !== edgeBrowserName) return;
+  if (!window.browserConnection || typeof window.browserConnection.request !== "function") {
+    setConnectStatus("Shared Edge link is stale. Enable the Edge extension to reconnect.");
+    return;
+  }
+  autoReconnectStarted = true;
+  sessionStorage.removeItem("browserConnectionAutoConnect:" + window.location.origin + window.location.pathname);
+  setConnectStatus("Shared Edge link is stale. Requesting a new Edge connection.");
   connectEdge(true).catch(error => setConnectStatus(error.message || String(error)));
 }
 
@@ -1097,6 +1112,7 @@ function renderActivity(activity) {
   const err = document.getElementById("tabsError");
   err.hidden = !activity.tabsError;
   err.textContent = activity.tabsError || "";
+  maybeReconnectEdgeAfterTabsError(activity.tabsError || "");
   renderScreenshot(activity.latestScreenshot, shots);
   renderTabs(lastWindows);
   renderEvents(events);

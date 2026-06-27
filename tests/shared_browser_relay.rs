@@ -275,7 +275,7 @@ fn rbc_navigates_shared_browser_through_relay_link_without_mcp() {
 }
 
 #[test]
-fn rbc_runs_playwright_subset_through_shared_browser_link() {
+fn rbc_runs_playwright_crx_through_shared_browser_link() {
     let relay_port = unused_local_port();
     let relay_bind = format!("127.0.0.1:{relay_port}");
     let relay = Command::new(env!("CARGO_BIN_EXE_browser-connection-relay"))
@@ -295,32 +295,29 @@ fn rbc_runs_playwright_subset_through_shared_browser_link() {
     let browser_thread = thread::spawn(move || {
         let mut socket = retry_browser_connect(&browser_url);
         ready_tx.send(()).expect("signal browser websocket ready");
-        for _ in 0..2 {
-            let message = socket.read().expect("read relayed browser command");
-            if let Message::Text(text) = message {
-                let request: Value = serde_json::from_str(&text).expect("request is JSON");
-                let result = match request["command"].as_str() {
-                    Some("navigate") => {
-                        assert_eq!(request["params"]["url"], "https://example.com/");
-                        json!({ "tab": { "url": "https://example.com/" } })
-                    }
-                    Some("evaluate") => {
-                        assert_eq!(request["params"]["expression"], "document.title");
-                        json!({ "tab": {}, "value": "Shared Title" })
-                    }
-                    other => panic!("unexpected command: {other:?}"),
-                };
-                socket
-                    .send(Message::Text(
-                        json!({
-                            "id": request["id"].clone(),
+        let message = socket.read().expect("read relayed browser command");
+        if let Message::Text(text) = message {
+            let request: Value = serde_json::from_str(&text).expect("request is JSON");
+            assert_eq!(request["command"], "run_playwright");
+            assert_eq!(request["params"]["allowClose"], false);
+            assert!(request["params"]["code"]
+                .as_str()
+                .expect("code param is a string")
+                .contains("page.goto('https://example.com/')"));
+            socket
+                .send(Message::Text(
+                    json!({
+                        "id": request["id"].clone(),
+                        "ok": true,
+                        "result": {
                             "ok": true,
-                            "result": result
-                        })
-                        .to_string(),
-                    ))
-                    .expect("send relayed browser response");
-            }
+                            "mode": "playwright-crx",
+                            "tab": { "url": "https://example.com/" }
+                        }
+                    })
+                    .to_string(),
+                ))
+                .expect("send relayed browser response");
         }
     });
     ready_rx
@@ -367,5 +364,6 @@ fn rbc_runs_playwright_subset_through_shared_browser_link() {
     let value: Value = serde_json::from_slice(&output.stdout).expect("stdout is JSON");
     assert_eq!(value["tool"], "browser_playwright");
     assert_eq!(value["target"]["kind"], "shared-extension");
-    assert_eq!(value["result"]["title"], "Shared Title");
+    assert_eq!(value["result"]["mode"], "playwright-crx");
+    assert_eq!(value["result"]["tab"]["url"], "https://example.com/");
 }
