@@ -1,11 +1,12 @@
 use anyhow::{anyhow, Result};
+use serde::{Deserialize, Serialize};
 use std::env;
 
 pub const MANAGED_BROWSER_NAME: &str = "managed";
 pub const EXPLICIT_BROWSER_NAME: &str = "explicit";
 pub const PERSONAL_BROWSER_NAME: &str = "personal";
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NamedBrowserEndpoint {
     pub name: String,
     pub cdp_endpoint: String,

@@ -2,10 +2,12 @@ use super::{McpRuntime, PERSONAL_BROWSER_NAME};
 use crate::shared_browser::BrowserShareRelay;
 use anyhow::{anyhow, Context, Result};
 use serde_json::{json, Value};
+use std::env;
 use std::fmt::Write as _;
-use std::fs::File;
+use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
@@ -13,20 +15,20 @@ use std::time::Duration;
 const MAX_HTTP_REQUEST_BYTES: usize = 64 * 1024;
 
 pub(super) fn spawn_control_panel(runtime: Arc<Mutex<McpRuntime>>) -> Result<()> {
-    let port = {
+    let (port, project_id) = {
         let runtime = runtime
             .lock()
             .map_err(|_| anyhow!("MCP runtime lock was poisoned"))?;
-        runtime.config.control_port
-    };
-    let Some(port) = port else {
-        return Ok(());
+        let Some(port) = runtime.config.control_port else {
+            return Ok(());
+        };
+        (port, runtime.config.project_id.clone())
     };
 
     let listener = TcpListener::bind(("127.0.0.1", port))
         .with_context(|| format!("failed to bind browser control panel on 127.0.0.1:{port}"))?;
     let relay = BrowserShareRelay::new();
-    let control_token = Arc::new(generate_control_token()?);
+    let control_token = Arc::new(load_or_create_control_token(&project_id)?);
     thread::Builder::new()
         .name("browser-control-panel".to_string())
         .spawn(move || {
@@ -578,6 +580,69 @@ fn generate_control_token() -> Result<String> {
         write!(&mut token, "{byte:02x}").expect("writing to a String cannot fail");
     }
     Ok(token)
+}
+
+fn load_or_create_control_token(project_id: &str) -> Result<String> {
+    let path = control_token_path(project_id);
+    if let Ok(token) = fs::read_to_string(&path) {
+        let token = token.trim();
+        if is_control_token(token) {
+            return Ok(token.to_string());
+        }
+    }
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    let token = generate_control_token()?;
+    let mut options = OpenOptions::new();
+    options.create(true).write(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options
+        .open(&path)
+        .with_context(|| format!("failed to write {}", path.display()))?;
+    file.write_all(token.as_bytes())
+        .with_context(|| format!("failed to write {}", path.display()))?;
+    Ok(token)
+}
+
+fn is_control_token(token: &str) -> bool {
+    token.len() == 64 && token.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn control_token_path(project_id: &str) -> PathBuf {
+    runtime_state_dir().join(format!(
+        "{}.control-token",
+        runtime_state_file_stem(project_id)
+    ))
+}
+
+fn runtime_state_dir() -> PathBuf {
+    env::var_os("BROWSER_CONNECTION_STATE_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| env::temp_dir().join("browser-connection"))
+}
+
+fn runtime_state_file_stem(project_id: &str) -> String {
+    let stem = project_id
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.') {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    if stem.is_empty() {
+        "default".to_string()
+    } else {
+        stem
+    }
 }
 
 fn escape_js_string(value: &str) -> String {

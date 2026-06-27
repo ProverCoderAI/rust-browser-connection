@@ -5,6 +5,7 @@ const DEFAULT_RELAY_URL = "http://127.0.0.1:8765";
 const STORAGE_KEY = "edgeShareState";
 const RECONNECT_MIN_MS = 1000;
 const RECONNECT_MAX_MS = 30000;
+const RECONNECT_ALARM_NAME = "edge-share-reconnect";
 const RELAY_KEEPALIVE_MS = 20 * 1000;
 const PLATFORM_CONNECT_TTL_MS = 2 * 60 * 1000;
 const PLATFORM_RELAY_CONNECT_TIMEOUT_MS = 8000;
@@ -71,6 +72,14 @@ chrome.debugger.onDetach.addListener((source) => {
     attachedTabs.delete(source.tabId);
   }
 });
+
+if (chrome.alarms && chrome.alarms.onAlarm) {
+  chrome.alarms.onAlarm.addListener((alarm) => {
+    if (alarm && alarm.name === RECONNECT_ALARM_NAME) {
+      restoreState().then(connectIfNeeded).catch(reportError);
+    }
+  });
+}
 
 restoreState().then(connectIfNeeded).catch(reportError);
 
@@ -352,6 +361,7 @@ function connectRelay() {
 
   socket.addEventListener("open", () => {
     reconnectDelayMs = RECONNECT_MIN_MS;
+    clearReconnectTimer();
     persistState({ connected: true, status: "connected", lastError: "" }).catch(reportError);
     sendSocket({
       type: "hello",
@@ -390,22 +400,36 @@ function connectRelay() {
   socket.addEventListener("error", () => {
     clearKeepAliveTimer();
     persistState({ lastError: "WebSocket error" }).catch(reportError);
+    if (state.sharing && !intentionallyClosed) {
+      scheduleReconnect();
+    }
   });
 }
 
 function scheduleReconnect() {
   clearReconnectTimer();
+  const delayMs = reconnectDelayMs;
   reconnectTimer = setTimeout(() => {
     reconnectTimer = null;
     reconnectDelayMs = Math.min(reconnectDelayMs * 2, RECONNECT_MAX_MS);
     connectRelay();
-  }, reconnectDelayMs);
+  }, delayMs);
+  if (chrome.alarms && chrome.alarms.create) {
+    chrome.alarms.create(RECONNECT_ALARM_NAME, {
+      delayInMinutes: Math.max(0.5, delayMs / 60000)
+    });
+  }
 }
 
 function clearReconnectTimer() {
   if (reconnectTimer) {
     clearTimeout(reconnectTimer);
     reconnectTimer = null;
+  }
+  if (chrome.alarms && chrome.alarms.clear) {
+    chrome.alarms.clear(RECONNECT_ALARM_NAME, () => {
+      void chrome.runtime.lastError;
+    });
   }
 }
 
@@ -461,6 +485,11 @@ async function handlePlatformRequest(message, sender) {
     throw new Error("Platform relayUrl must use the requesting page origin");
   }
 
+  const reused = await tryReusePlatformShare(request);
+  if (reused) {
+    return reused;
+  }
+
   return new Promise((resolve, reject) => {
     const timeout = setTimeout(() => {
       pendingPlatformRequests.delete(requestId);
@@ -491,6 +520,47 @@ async function handlePlatformRequest(message, sender) {
       }
     );
   });
+}
+
+async function tryReusePlatformShare(request) {
+  await restoreState();
+  if (!state.sharing || !state.shareUrl || !state.sessionId || !state.browserToken) {
+    return null;
+  }
+  if (normalizeRelayUrl(state.relayUrl) !== request.relayUrl) {
+    return null;
+  }
+  if (state.platformOrigin && state.platformOrigin !== request.origin) {
+    return null;
+  }
+
+  intentionallyClosed = false;
+  reconnectDelayMs = RECONNECT_MIN_MS;
+  await persistState({
+    platformOrigin: request.origin,
+    platformHref: request.href,
+    workspaceId: request.workspaceId,
+    poolId: request.poolId,
+    browserName: request.browserName,
+    relayUrl: request.relayUrl,
+    lastError: "",
+    status: state.connected ? "connected" : "connecting"
+  });
+  if (!socket || socket.readyState !== WebSocket.OPEN) {
+    connectRelay();
+  }
+  await waitForRelayConnection(PLATFORM_RELAY_CONNECT_TIMEOUT_MS);
+  const result = publicState();
+  return {
+    shareUrl: result.shareUrl,
+    sessionId: result.sessionId,
+    connected: result.connected,
+    relayUrl: result.relayUrl,
+    platformOrigin: request.origin,
+    workspaceId: request.workspaceId,
+    poolId: request.poolId,
+    browserName: request.browserName
+  };
 }
 
 async function getPlatformConnectRequest(requestId) {
@@ -1694,8 +1764,16 @@ function sendSocket(message) {
   if (!socket || socket.readyState !== WebSocket.OPEN) {
     return false;
   }
-  socket.send(JSON.stringify(message));
-  return true;
+  try {
+    socket.send(JSON.stringify(message));
+    return true;
+  } catch (error) {
+    persistState({ lastError: errorMessage(error), connected: false }).catch(reportError);
+    if (state.sharing && !intentionallyClosed) {
+      scheduleReconnect();
+    }
+    return false;
+  }
 }
 
 function buildShareUrl(relayUrl, sessionId, agentToken) {

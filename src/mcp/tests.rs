@@ -1,5 +1,6 @@
 use super::*;
 use serde_json::{json, Value};
+use std::fs;
 use std::io::Cursor;
 
 fn encode_message(value: Value) -> Vec<u8> {
@@ -348,6 +349,47 @@ fn browser_list_reports_control_panel_url_when_enabled() {
     let inventory = runtime.browser_inventory().expect("inventory renders");
 
     assert_eq!(inventory["controlPanelUrl"], "http://127.0.0.1:6888/");
+}
+
+#[test]
+fn runtime_restores_panel_selected_shared_browser_from_state_file() {
+    let project = format!(
+        "dg-test-persist-{}-{}",
+        std::process::id(),
+        activity::now_ms()
+    );
+    let config = McpServerConfig::new(&project, None, None, false).with_control_port(Some(6888));
+    let mut runtime = McpRuntime::new(config).expect("runtime config is valid");
+
+    runtime
+        .select_browser(
+            "edge",
+            None,
+            None,
+            None,
+            Some("https://relay.example/share/s1#agent=a1"),
+        )
+        .expect("shared browser selection persists");
+
+    let restored = McpRuntime::new(
+        McpServerConfig::new(&project, None, None, false).with_control_port(Some(6888)),
+    )
+    .expect("runtime restores persisted shared browser");
+    let inventory = restored.browser_inventory().expect("inventory renders");
+
+    assert_eq!(inventory["active"], "edge");
+    assert!(inventory["browsers"]
+        .as_array()
+        .expect("browsers array")
+        .iter()
+        .any(|browser| {
+            browser["name"] == "edge"
+                && browser["kind"] == "shared-extension"
+                && browser["shareUrl"] == "https://relay.example/share/s1#agent=a1"
+                && browser["active"] == true
+        }));
+
+    let _ = fs::remove_file(runtime_state_path(&project));
 }
 
 #[test]

@@ -48,7 +48,8 @@
     "tabs",
     "contextMenus",
     "storage",
-    "sidePanel"
+    "sidePanel",
+    "alarms"
   ],
   "host_permissions": [
     "<all_urls>"

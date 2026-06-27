@@ -27,6 +27,7 @@ pub const MAX_TOKEN_BYTES: usize = 512;
 pub const MAX_JSON_MESSAGE_BYTES: usize = 8 * 1024 * 1024;
 pub const MAX_SESSIONS: usize = 1024;
 pub const SHARED_BROWSER_COMMAND_TIMEOUT: Duration = Duration::from_secs(10);
+pub const SHARED_BROWSER_PLAYWRIGHT_TIMEOUT: Duration = Duration::from_secs(120);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RelayConfig {
@@ -240,9 +241,14 @@ impl SharedBrowserClient {
     }
 
     pub fn run_playwright(&self, code: &str, allow_close: bool) -> Result<Value> {
-        self.call(
+        self.call_with_timeout(
             "run_playwright",
-            json!({ "code": code, "allowClose": allow_close }),
+            json!({
+                "code": code,
+                "allowClose": allow_close,
+                "timeoutMs": SHARED_BROWSER_PLAYWRIGHT_TIMEOUT.as_millis() as u64
+            }),
+            SHARED_BROWSER_PLAYWRIGHT_TIMEOUT,
         )
     }
 
@@ -259,11 +265,15 @@ impl SharedBrowserClient {
     }
 
     fn call(&self, command: &str, params: Value) -> Result<Value> {
+        self.call_with_timeout(command, params, SHARED_BROWSER_COMMAND_TIMEOUT)
+    }
+
+    fn call_with_timeout(&self, command: &str, params: Value, timeout: Duration) -> Result<Value> {
         let websocket_url = agent_ws_url_from_share_url(&self.share_url)?;
         let (mut socket, _) = connect(&websocket_url).with_context(|| {
             format!("failed to connect to shared browser relay {websocket_url}")
         })?;
-        set_agent_socket_timeouts(&mut socket);
+        set_agent_socket_timeouts(&mut socket, timeout);
         let request = json!({ "id": 1, "command": command, "params": params });
         socket
             .send(Message::Text(request.to_string()))
@@ -306,17 +316,17 @@ impl SharedBrowserClient {
     }
 }
 
-fn set_agent_socket_timeouts(socket: &mut WebSocket<MaybeTlsStream<TcpStream>>) {
+fn set_agent_socket_timeouts(socket: &mut WebSocket<MaybeTlsStream<TcpStream>>, timeout: Duration) {
     let stream = socket.get_mut();
     match stream {
         MaybeTlsStream::Plain(stream) => {
-            let _ = stream.set_read_timeout(Some(SHARED_BROWSER_COMMAND_TIMEOUT));
-            let _ = stream.set_write_timeout(Some(SHARED_BROWSER_COMMAND_TIMEOUT));
+            let _ = stream.set_read_timeout(Some(timeout));
+            let _ = stream.set_write_timeout(Some(timeout));
         }
         MaybeTlsStream::NativeTls(stream) => {
             let stream = stream.get_mut();
-            let _ = stream.set_read_timeout(Some(SHARED_BROWSER_COMMAND_TIMEOUT));
-            let _ = stream.set_write_timeout(Some(SHARED_BROWSER_COMMAND_TIMEOUT));
+            let _ = stream.set_read_timeout(Some(timeout));
+            let _ = stream.set_write_timeout(Some(timeout));
         }
         _ => {}
     }
@@ -335,13 +345,20 @@ struct RelaySession {
     browser_token: String,
     agent_token: String,
     browser: Option<PeerHandle>,
-    agent: Option<PeerHandle>,
+    agents: HashMap<u64, PeerHandle>,
+    pending_agent_requests: HashMap<String, PendingAgentRequest>,
 }
 
 #[derive(Debug, Clone)]
 struct PeerHandle {
     connection_id: u64,
     tx: mpsc::Sender<String>,
+}
+
+#[derive(Debug, Clone)]
+struct PendingAgentRequest {
+    connection_id: u64,
+    original_id: Value,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -390,7 +407,8 @@ impl RelayState {
                             browser_token: browser_token.clone(),
                             agent_token: agent_token.clone(),
                             browser: None,
-                            agent: None,
+                            agents: HashMap::new(),
+                            pending_agent_requests: HashMap::new(),
                         });
                 if session_entry.browser_token != *browser_token {
                     return Err(anyhow!("browser token did not match session"));
@@ -411,7 +429,9 @@ impl RelayState {
                 if session_entry.agent_token != *agent_token {
                     return Err(anyhow!("agent token did not match session"));
                 }
-                session_entry.agent = Some(PeerHandle { connection_id, tx });
+                session_entry
+                    .agents
+                    .insert(connection_id, PeerHandle { connection_id, tx });
                 Ok((session.clone(), PeerRole::Agent, connection_id))
             }
         }
@@ -435,13 +455,10 @@ impl RelayState {
                 }
             }
             PeerRole::Agent => {
-                if session_entry
-                    .agent
-                    .as_ref()
-                    .is_some_and(|peer| peer.connection_id == connection_id)
-                {
-                    session_entry.agent = None;
-                }
+                session_entry.agents.remove(&connection_id);
+                session_entry
+                    .pending_agent_requests
+                    .retain(|_, pending| pending.connection_id != connection_id);
             }
         }
     }
@@ -453,34 +470,80 @@ impl RelayState {
         connection_id: u64,
         raw_message: &str,
     ) -> Result<()> {
-        let message = match validate_relay_json_message(from, raw_message)? {
+        let mut message = match validate_relay_json_message(from, raw_message)? {
             Some(message) => message,
             None => return Ok(()),
         };
-        let sessions = self
+        let mut sessions = self
             .sessions
             .lock()
             .map_err(|_| anyhow!("relay session lock was poisoned"))?;
         let session_entry = sessions
             .get(session)
             .ok_or_else(|| anyhow!("relay session is not registered"))?;
-        let sender = match from {
-            PeerRole::Browser => session_entry.browser.as_ref(),
-            PeerRole::Agent => session_entry.agent.as_ref(),
+        match from {
+            PeerRole::Agent => {
+                if !session_entry.agents.contains_key(&connection_id) {
+                    return Err(anyhow!("relay sender connection is stale"));
+                }
+            }
+            PeerRole::Browser => {
+                let sender = session_entry
+                    .browser
+                    .as_ref()
+                    .ok_or_else(|| anyhow!("relay sender is not connected"))?;
+                if sender.connection_id != connection_id {
+                    return Err(anyhow!("relay sender connection is stale"));
+                }
+            }
         }
-        .ok_or_else(|| anyhow!("relay sender is not connected"))?;
-        if sender.connection_id != connection_id {
-            return Err(anyhow!("relay sender connection is stale"));
+
+        let session_entry = sessions
+            .get_mut(session)
+            .ok_or_else(|| anyhow!("relay session is not registered"))?;
+        match from {
+            PeerRole::Agent => {
+                let original_id = message
+                    .get("id")
+                    .cloned()
+                    .ok_or_else(|| anyhow!("relay JSON message must include request id"))?;
+                let relay_id = relay_agent_request_id(connection_id, &original_id)?;
+                message["id"] = Value::String(relay_id.clone());
+                session_entry.pending_agent_requests.insert(
+                    relay_id,
+                    PendingAgentRequest {
+                        connection_id,
+                        original_id,
+                    },
+                );
+                let target = session_entry
+                    .browser
+                    .as_ref()
+                    .ok_or_else(|| anyhow!("relay peer is not connected"))?;
+                target
+                    .tx
+                    .send(serde_json::to_string(&message)?)
+                    .context("failed to forward relay message")
+            }
+            PeerRole::Browser => {
+                let relay_id = message
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+                    .ok_or_else(|| anyhow!("relay browser response id was not rewritten"))?;
+                let Some(pending) = session_entry.pending_agent_requests.remove(&relay_id) else {
+                    return Ok(());
+                };
+                message["id"] = pending.original_id;
+                let Some(target) = session_entry.agents.get(&pending.connection_id) else {
+                    return Ok(());
+                };
+                target
+                    .tx
+                    .send(serde_json::to_string(&message)?)
+                    .context("failed to forward relay message")
+            }
         }
-        let target = match from {
-            PeerRole::Browser => session_entry.agent.as_ref(),
-            PeerRole::Agent => session_entry.browser.as_ref(),
-        }
-        .ok_or_else(|| anyhow!("relay peer is not connected"))?;
-        target
-            .tx
-            .send(message)
-            .context("failed to forward relay message")
     }
 }
 
@@ -646,7 +709,7 @@ fn parse_share_path(path: &str) -> Result<String> {
     }
 }
 
-fn validate_relay_json_message(from: PeerRole, raw_message: &str) -> Result<Option<String>> {
+fn validate_relay_json_message(from: PeerRole, raw_message: &str) -> Result<Option<Value>> {
     if raw_message.len() > MAX_JSON_MESSAGE_BYTES {
         return Err(anyhow!("relay JSON message exceeded size limit"));
     }
@@ -662,9 +725,18 @@ fn validate_relay_json_message(from: PeerRole, raw_message: &str) -> Result<Opti
             "relay JSON message id must be a string, number, or boolean"
         ));
     }
-    serde_json::to_string(&value)
-        .map(Some)
-        .context("failed to encode relay JSON message")
+    Ok(Some(value))
+}
+
+fn relay_agent_request_id(connection_id: u64, original_id: &Value) -> Result<String> {
+    if original_id.is_null() || original_id.is_array() || original_id.is_object() {
+        return Err(anyhow!(
+            "relay JSON message id must be a string, number, or boolean"
+        ));
+    }
+    let encoded_id =
+        serde_json::to_string(original_id).context("failed to encode relay request id")?;
+    Ok(format!("{connection_id}:{encoded_id}"))
 }
 
 fn validate_session_id(value: &str) -> Result<String> {
@@ -842,12 +914,72 @@ mod tests {
             .send(Message::Text(r#"{"id":"1","method":"ping"}"#.to_string()))
             .unwrap();
         let forwarded_to_browser = browser.read().unwrap().to_text().unwrap().to_string();
-        assert_eq!(forwarded_to_browser, r#"{"id":"1","method":"ping"}"#);
+        let forwarded_json: Value = serde_json::from_str(&forwarded_to_browser).unwrap();
+        let relay_id = forwarded_json["id"].as_str().unwrap().to_string();
+        assert!(relay_id.ends_with(":\"1\""));
+        assert_eq!(forwarded_json["method"], "ping");
 
         browser
-            .send(Message::Text(r#"{"id":"1","result":"pong"}"#.to_string()))
+            .send(Message::Text(
+                json!({ "id": relay_id, "result": "pong" }).to_string(),
+            ))
             .unwrap();
         let forwarded_to_agent = agent.read().unwrap().to_text().unwrap().to_string();
         assert_eq!(forwarded_to_agent, r#"{"id":"1","result":"pong"}"#);
+    }
+
+    #[test]
+    fn routes_concurrent_agent_requests_by_rewritten_id() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        thread::spawn(move || {
+            let _ = serve_listener(listener);
+        });
+
+        let browser_url = format!(
+            "ws://127.0.0.1:{port}/ws/browser/session-2?token=browser-token&agent_token=agent-token"
+        );
+        let agent_url = format!("ws://127.0.0.1:{port}/ws/agent/session-2?token=agent-token");
+        let (mut browser, _) = connect(browser_url).unwrap();
+        let (mut agent_a, _) = connect(agent_url.clone()).unwrap();
+        let (mut agent_b, _) = connect(agent_url).unwrap();
+
+        agent_a
+            .send(Message::Text(r#"{"id":1,"method":"first"}"#.to_string()))
+            .unwrap();
+        agent_b
+            .send(Message::Text(r#"{"id":1,"method":"second"}"#.to_string()))
+            .unwrap();
+
+        let first_to_browser: Value =
+            serde_json::from_str(browser.read().unwrap().to_text().unwrap()).unwrap();
+        let second_to_browser: Value =
+            serde_json::from_str(browser.read().unwrap().to_text().unwrap()).unwrap();
+        let mut first_id = String::new();
+        let mut second_id = String::new();
+        for message in [first_to_browser, second_to_browser] {
+            match message["method"].as_str().unwrap() {
+                "first" => first_id = message["id"].as_str().unwrap().to_string(),
+                "second" => second_id = message["id"].as_str().unwrap().to_string(),
+                other => panic!("unexpected method {other}"),
+            }
+        }
+        assert_ne!(first_id, second_id);
+
+        browser
+            .send(Message::Text(
+                json!({ "id": second_id, "result": "second-ok" }).to_string(),
+            ))
+            .unwrap();
+        browser
+            .send(Message::Text(
+                json!({ "id": first_id, "result": "first-ok" }).to_string(),
+            ))
+            .unwrap();
+
+        let response_b = agent_b.read().unwrap().to_text().unwrap().to_string();
+        let response_a = agent_a.read().unwrap().to_text().unwrap().to_string();
+        assert_eq!(response_b, r#"{"id":1,"result":"second-ok"}"#);
+        assert_eq!(response_a, r#"{"id":1,"result":"first-ok"}"#);
     }
 }

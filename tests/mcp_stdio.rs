@@ -4,7 +4,7 @@ use std::process::{Command, Stdio};
 use std::thread;
 use std::time::Duration;
 
-use serde_json::Value;
+use serde_json::{json, Value};
 use tungstenite::stream::MaybeTlsStream;
 use tungstenite::{connect, Message, WebSocket};
 
@@ -456,10 +456,19 @@ fn control_panel_embeds_browser_share_relay() {
             .to_text()
             .expect("command is text")
             .to_string();
-        assert_eq!(forwarded_to_browser, r#"{"id":"1","method":"ping"}"#);
+        let forwarded_json: Value =
+            serde_json::from_str(&forwarded_to_browser).expect("forwarded command is JSON");
+        let relay_id = forwarded_json["id"]
+            .as_str()
+            .expect("relay request id is a string")
+            .to_string();
+        assert!(relay_id.ends_with(":\"1\""));
+        assert_eq!(forwarded_json["method"], "ping");
 
         browser
-            .send(Message::Text(r#"{"id":"1","result":"pong"}"#.to_string()))
+            .send(Message::Text(
+                json!({ "id": relay_id, "result": "pong" }).to_string(),
+            ))
             .expect("send browser response");
         let forwarded_to_agent = agent
             .read()

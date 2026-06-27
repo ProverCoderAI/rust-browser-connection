@@ -23,9 +23,12 @@ use crate::{
 };
 use activity::BrowserActivityLog;
 use anyhow::{anyhow, Context, Result};
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::env;
+use std::fs;
 use std::io::{BufRead, Write};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 mod activity;
@@ -200,7 +203,8 @@ struct McpRuntime {
 }
 
 impl McpRuntime {
-    fn new(config: McpServerConfig) -> Result<Self> {
+    fn new(mut config: McpServerConfig) -> Result<Self> {
+        load_persisted_runtime_config(&mut config);
         let explicit_endpoint = explicit_cdp_endpoint(&config)?;
         let active_browser = config.active_browser.clone().unwrap_or_else(|| {
             if explicit_endpoint.is_some() {
@@ -513,6 +517,7 @@ impl McpRuntime {
 
         self.active_browser = name;
         self.ensure_active_display()?;
+        self.persist_runtime_config()?;
         let inventory = self.browser_inventory()?;
         serde_json::to_string_pretty(&json!({
             "selected": self.active_browser,
@@ -556,6 +561,23 @@ impl McpRuntime {
             "Unknown browser `{name}`. Available browsers: {}",
             self.available_browser_names().join(", ")
         ))
+    }
+
+    fn persist_runtime_config(&self) -> Result<()> {
+        if self.config.control_port.is_none() {
+            return Ok(());
+        }
+        let state = PersistedRuntimeState {
+            active_browser: Some(self.active_browser.clone()),
+            browser_endpoints: self.config.browser_endpoints.clone(),
+        };
+        let path = runtime_state_path(&self.config.project_id);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("failed to create {}", parent.display()))?;
+        }
+        let body = serde_json::to_vec_pretty(&state).context("failed to encode runtime state")?;
+        fs::write(&path, body).with_context(|| format!("failed to write {}", path.display()))
     }
 
     fn ensure_active_display(&mut self) -> Result<()> {
@@ -626,6 +648,67 @@ fn explicit_cdp_endpoint(config: &McpServerConfig) -> Result<Option<String>> {
         .as_deref()
         .map(normalize_cdp_endpoint)
         .transpose()
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct PersistedRuntimeState {
+    active_browser: Option<String>,
+    browser_endpoints: Vec<NamedBrowserEndpoint>,
+}
+
+fn load_persisted_runtime_config(config: &mut McpServerConfig) {
+    if config.control_port.is_none() {
+        return;
+    }
+    let path = runtime_state_path(&config.project_id);
+    let Ok(body) = fs::read_to_string(&path) else {
+        return;
+    };
+    let Ok(state) = serde_json::from_str::<PersistedRuntimeState>(&body) else {
+        return;
+    };
+    for endpoint in state.browser_endpoints {
+        if !config
+            .browser_endpoints
+            .iter()
+            .any(|existing| existing.name == endpoint.name)
+        {
+            config.browser_endpoints.push(endpoint);
+        }
+    }
+    if config.active_browser.is_none() {
+        config.active_browser = state
+            .active_browser
+            .and_then(|name| normalize_browser_name(&name).ok());
+    }
+}
+
+fn runtime_state_path(project_id: &str) -> PathBuf {
+    runtime_state_dir().join(format!("{}.json", runtime_state_file_stem(project_id)))
+}
+
+fn runtime_state_dir() -> PathBuf {
+    env::var_os("BROWSER_CONNECTION_STATE_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| env::temp_dir().join("browser-connection"))
+}
+
+fn runtime_state_file_stem(project_id: &str) -> String {
+    let stem = project_id
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.') {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    if stem.is_empty() {
+        "default".to_string()
+    } else {
+        stem
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
