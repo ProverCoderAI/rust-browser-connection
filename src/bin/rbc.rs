@@ -45,11 +45,16 @@ struct Cli {
     #[arg(long, global = true, value_name = "DIR")]
     trace_dir: Option<PathBuf>,
 
+    /// List configured browser targets from the control panel or environment.
+    #[arg(long, global = true)]
+    list: bool,
+
     /// Browser name from the configured pool, or a legacy docker-git project id.
-    target: String,
+    #[arg(required_unless_present = "list")]
+    target: Option<String>,
 
     #[command(subcommand)]
-    command: TopCommand,
+    command: Option<TopCommand>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -157,16 +162,146 @@ fn main() {
 
 fn run() -> Result<()> {
     let cli = Cli::parse();
-    if matches!(cli.command, TopCommand::Pw { .. }) {
+    if cli.list {
+        return run_list_cli(&cli);
+    }
+    let command = required_command(&cli)?;
+    if matches!(command, TopCommand::Pw { .. }) {
         return run_playwright_cli(&cli);
     }
 
     run_tool_cli(&cli)
 }
 
+fn run_list_cli(cli: &Cli) -> Result<()> {
+    if cli.target.is_some() || cli.command.is_some() {
+        return Err(anyhow!("rbc --list does not take a target or command"));
+    }
+    let inventory = target_resolution::load_inventory(target_resolution::InventoryOptions {
+        control_port: cli.control_port,
+        control_url: cli.control_url.as_deref(),
+    })?;
+    if cli.json_output {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&inventory).context("failed to render inventory JSON")?
+        );
+        return Ok(());
+    }
+    print_inventory_table(&inventory)
+}
+
+fn print_inventory_table(inventory: &Value) -> Result<()> {
+    let active = inventory
+        .get("active")
+        .and_then(Value::as_str)
+        .unwrap_or("-");
+    println!("Active: {active}");
+    if let Some(url) = inventory.get("controlPanelUrl").and_then(Value::as_str) {
+        println!("Control panel: {url}");
+    }
+    println!();
+    println!(
+        "{:<28} {:<7} {:<18} {:<18} {:<14} {:<18} endpoint",
+        "target", "active", "kind", "owner", "browser", "status"
+    );
+    println!("{}", "-".repeat(128));
+
+    let browsers = inventory
+        .get("browsers")
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow!("inventory did not include browsers"))?;
+    for browser in browsers {
+        let name = field(browser, "name");
+        let active_marker = if browser.get("active").and_then(Value::as_bool) == Some(true) {
+            "yes"
+        } else {
+            ""
+        };
+        let kind = field(browser, "kind");
+        let owner = first_field(browser, &["ownerLabel", "ownerId", "workspaceId"]);
+        let browser_label = first_field(browser, &["browserLabel", "browserKind", "deviceLabel"]);
+        let status = if browser.get("connected").and_then(Value::as_bool) == Some(false) {
+            "disconnected".to_string()
+        } else {
+            field(browser, "status")
+        };
+        println!(
+            "{:<28} {:<7} {:<18} {:<18} {:<14} {:<18} {}",
+            truncate(&name, 28),
+            active_marker,
+            truncate(&kind, 18),
+            truncate(&owner, 18),
+            truncate(&browser_label, 14),
+            truncate(&status, 18),
+            endpoint_summary(browser)
+        );
+    }
+    Ok(())
+}
+
+fn field(value: &Value, name: &str) -> String {
+    value
+        .get(name)
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("-")
+        .to_string()
+}
+
+fn first_field(value: &Value, names: &[&str]) -> String {
+    names
+        .iter()
+        .find_map(|name| {
+            value
+                .get(*name)
+                .and_then(Value::as_str)
+                .filter(|value| !value.trim().is_empty())
+                .map(ToString::to_string)
+        })
+        .unwrap_or_else(|| "-".to_string())
+}
+
+fn endpoint_summary(browser: &Value) -> String {
+    if browser
+        .get("shareUrl")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .is_some()
+    {
+        return "shared-extension".to_string();
+    }
+    browser
+        .get("cdpEndpoint")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .map(ToString::to_string)
+        .or_else(|| {
+            browser
+                .get("novncUrl")
+                .and_then(Value::as_str)
+                .filter(|value| !value.trim().is_empty())
+                .map(ToString::to_string)
+        })
+        .unwrap_or_else(|| "-".to_string())
+}
+
+fn truncate(value: &str, width: usize) -> String {
+    if value.chars().count() <= width {
+        return value.to_string();
+    }
+    let mut output = value
+        .chars()
+        .take(width.saturating_sub(1))
+        .collect::<String>();
+    output.push('~');
+    output
+}
+
 fn run_tool_cli(cli: &Cli) -> Result<()> {
     let target = resolve_target(cli)?;
-    let tool = tool_command(&cli.command);
+    let command = required_command(cli)?;
+    let tool = tool_command(command);
     let command = browser_command(&tool)?;
     let started = Instant::now();
     let result = dispatch_browser_command(&target, &command);
@@ -193,7 +328,8 @@ fn run_tool_cli(cli: &Cli) -> Result<()> {
 }
 
 fn run_playwright_cli(cli: &Cli) -> Result<()> {
-    let (script, allow_close) = playwright_input(&cli.command)?;
+    let command = required_command(cli)?;
+    let (script, allow_close) = playwright_input(command)?;
     let target = resolve_target(cli)?;
     let started = Instant::now();
     let result = playwright::run_playwright_script(&target, &script, allow_close);
@@ -227,13 +363,26 @@ struct CommandOutput {
 }
 
 fn resolve_target(cli: &Cli) -> Result<BrowserTarget> {
+    let target = required_target(cli)?;
     target_resolution::resolve_target(target_resolution::ResolveOptions {
         share_url: cli.share_url.as_deref(),
         cdp_url: cli.cdp_url.as_deref(),
         control_port: cli.control_port,
         control_url: cli.control_url.as_deref(),
-        target: &cli.target,
+        target,
     })
+}
+
+fn required_target(cli: &Cli) -> Result<&str> {
+    cli.target
+        .as_deref()
+        .ok_or_else(|| anyhow!("browser target is required unless --list is used"))
+}
+
+fn required_command(cli: &Cli) -> Result<&TopCommand> {
+    cli.command
+        .as_ref()
+        .ok_or_else(|| anyhow!("browser command is required unless --list is used"))
 }
 
 fn tool_command(command: &TopCommand) -> ToolCommand {
@@ -314,7 +463,7 @@ fn command_output(command: &BrowserCommand, text: &str, cli: &Cli) -> Result<Com
     if let BrowserCommand::Screenshot { .. } = command {
         if let ToolCommand::Screenshot {
             output: Some(path), ..
-        } = tool_command(&cli.command)
+        } = tool_command(required_command(cli)?)
         {
             let written = write_screenshot(text, &path)?;
             let result = json!({

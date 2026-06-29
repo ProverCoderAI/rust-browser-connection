@@ -2,11 +2,12 @@ use anyhow::{anyhow, Context, Result};
 use docker_git_browser_connection::browser_actions::BrowserTarget;
 use docker_git_browser_connection::mcp::{
     active_browser_from_env, browser_endpoints_from_env, NamedBrowserEndpoint,
+    MANAGED_BROWSER_NAME, PERSONAL_BROWSER_NAME,
 };
 use docker_git_browser_connection::{
     compute_browser_control_panel_port, compute_browser_ports, render_cdp_url_for_ports,
 };
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::env;
 use std::process::Command;
 
@@ -16,6 +17,31 @@ pub(super) struct ResolveOptions<'a> {
     pub control_port: Option<u16>,
     pub control_url: Option<&'a str>,
     pub target: &'a str,
+}
+
+pub(super) struct InventoryOptions<'a> {
+    pub control_port: Option<u16>,
+    pub control_url: Option<&'a str>,
+}
+
+pub(super) fn load_inventory(options: InventoryOptions<'_>) -> Result<Value> {
+    if let Some(url) = configured_control_url(options.control_url) {
+        return load_control_panel_inventory_url(&url);
+    }
+
+    if let Some(port) = options.control_port {
+        return load_control_panel_inventory(port);
+    }
+
+    if let Some(project) = project_id_from_env() {
+        let port = compute_browser_control_panel_port(&project);
+        if let Ok(inventory) = load_control_panel_inventory(port) {
+            return Ok(inventory);
+        }
+    }
+
+    let endpoints = browser_endpoints_from_env().context("failed to parse browser target env")?;
+    Ok(inventory_from_env_endpoints(&endpoints))
 }
 
 pub(super) fn resolve_target(options: ResolveOptions<'_>) -> Result<BrowserTarget> {
@@ -62,6 +88,69 @@ pub(super) fn resolve_target(options: ResolveOptions<'_>) -> Result<BrowserTarge
         Err(_) => Ok(BrowserTarget::cdp(render_cdp_url_for_ports(
             compute_browser_ports(selector),
         ))),
+    }
+}
+
+fn inventory_from_env_endpoints(endpoints: &[NamedBrowserEndpoint]) -> Value {
+    let project = project_id_from_env().unwrap_or_else(|| "default".to_string());
+    let active = active_browser_from_env().unwrap_or_else(|| MANAGED_BROWSER_NAME.to_string());
+    let mut browsers = vec![json!({
+        "name": MANAGED_BROWSER_NAME,
+        "kind": "managed",
+        "cdpEndpoint": render_cdp_url_for_ports(compute_browser_ports(&project)),
+        "vncEndpoint": Value::Null,
+        "novncUrl": Value::Null,
+        "shareUrl": Value::Null,
+        "resolution": "default-localhost",
+        "status": "default-localhost",
+        "connected": true,
+        "active": active == MANAGED_BROWSER_NAME
+    })];
+
+    for endpoint in endpoints {
+        let cdp_endpoint =
+            (!endpoint.cdp_endpoint.trim().is_empty()).then(|| endpoint.cdp_endpoint.clone());
+        let connected = cdp_endpoint.is_some() || endpoint.share_url.is_some();
+        browsers.push(json!({
+            "name": endpoint.name,
+            "kind": endpoint_kind(endpoint),
+            "cdpEndpoint": cdp_endpoint,
+            "vncEndpoint": endpoint.vnc_endpoint.clone(),
+            "novncUrl": endpoint.novnc_url.clone(),
+            "shareUrl": endpoint.share_url.clone(),
+            "resolution": "configured",
+            "status": "configured",
+            "connected": connected,
+            "active": endpoint.name == active,
+            "ownerId": endpoint.metadata.owner_id.clone(),
+            "ownerLabel": endpoint.metadata.owner_label.clone(),
+            "workspaceId": endpoint.metadata.workspace_id.clone(),
+            "poolId": endpoint.metadata.pool_id.clone(),
+            "installationId": endpoint.metadata.installation_id.clone(),
+            "deviceId": endpoint.metadata.device_id.clone(),
+            "deviceLabel": endpoint.metadata.device_label.clone(),
+            "browserKind": endpoint.metadata.browser_kind.clone(),
+            "browserLabel": endpoint.metadata.browser_label.clone(),
+            "platform": endpoint.metadata.platform.clone(),
+            "profileLabel": endpoint.metadata.profile_label.clone(),
+            "lastSeenAt": endpoint.metadata.last_seen_at.clone()
+        }));
+    }
+
+    json!({
+        "active": active,
+        "controlPanelUrl": Value::Null,
+        "browsers": browsers
+    })
+}
+
+fn endpoint_kind(endpoint: &NamedBrowserEndpoint) -> &'static str {
+    if endpoint.share_url.is_some() && endpoint.cdp_endpoint.trim().is_empty() {
+        "shared-extension"
+    } else if endpoint.name == PERSONAL_BROWSER_NAME {
+        "personal"
+    } else {
+        "external"
     }
 }
 
@@ -315,5 +404,28 @@ mod tests {
         });
         let target = target_from_inventory_for_selector(&inventory, "active").unwrap();
         assert!(matches!(target, BrowserTarget::Shared { .. }));
+    }
+
+    #[test]
+    fn env_inventory_lists_managed_and_named_shared_browsers() {
+        let mut endpoint =
+            NamedBrowserEndpoint::shared("alice-edge", "https://relay.example/share/s#agent=a")
+                .unwrap();
+        endpoint.metadata.owner_label = Some("Alice".to_string());
+        endpoint.metadata.browser_kind = Some("edge".to_string());
+
+        let inventory = inventory_from_env_endpoints(&[endpoint]);
+
+        assert_eq!(inventory["browsers"].as_array().unwrap().len(), 2);
+        let shared = inventory["browsers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|browser| browser["name"] == "alice-edge")
+            .unwrap();
+        assert_eq!(shared["kind"], "shared-extension");
+        assert_eq!(shared["ownerLabel"], "Alice");
+        assert_eq!(shared["browserKind"], "edge");
+        assert_eq!(shared["connected"], true);
     }
 }

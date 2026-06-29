@@ -1,4 +1,4 @@
-use super::{McpRuntime, PERSONAL_BROWSER_NAME};
+use super::{BrowserEndpointMetadata, McpRuntime, PERSONAL_BROWSER_NAME};
 use crate::shared_browser::BrowserShareRelay;
 use anyhow::{anyhow, Context, Result};
 use serde_json::{json, Value};
@@ -449,13 +449,10 @@ fn select_browser_response(runtime: Arc<Mutex<McpRuntime>>, request: &HttpReques
 }
 
 fn register_share_response(runtime: Arc<Mutex<McpRuntime>>, request: &HttpRequest) -> HttpResponse {
-    let Some(name) =
-        query_param(&request.target, "name").or_else(|| query_param(&request.body, "name"))
-    else {
-        return json_response(400, "Bad Request", json!({ "error": "name is required" }));
-    };
     let Some(share_url) = query_param(&request.target, "share_url")
         .or_else(|| query_param(&request.body, "share_url"))
+        .or_else(|| query_param(&request.target, "shareUrl"))
+        .or_else(|| query_param(&request.body, "shareUrl"))
     else {
         return json_response(
             400,
@@ -463,19 +460,53 @@ fn register_share_response(runtime: Arc<Mutex<McpRuntime>>, request: &HttpReques
             json!({ "error": "share_url is required" }),
         );
     };
+    let name = query_param_nonempty(request, "name")
+        .or_else(|| query_param_nonempty(request, "targetName"));
+    let metadata = share_metadata_from_request(request);
 
     let result = runtime
         .lock()
         .map_err(|_| anyhow!("MCP runtime lock was poisoned"))
-        .and_then(|mut runtime| runtime.select_browser(&name, None, None, None, Some(&share_url)));
+        .and_then(|mut runtime| {
+            runtime.register_shared_browser(name.as_deref(), &share_url, metadata)
+        });
     match result {
         Ok(text) => {
             let value = serde_json::from_str::<Value>(&text)
-                .unwrap_or_else(|_| json!({ "selected": name }));
+                .unwrap_or_else(|_| json!({ "selected": name.unwrap_or_default() }));
             json_response(200, "OK", value)
         }
         Err(error) => json_response(400, "Bad Request", json!({ "error": error.to_string() })),
     }
+}
+
+fn share_metadata_from_request(request: &HttpRequest) -> BrowserEndpointMetadata {
+    BrowserEndpointMetadata {
+        owner_id: query_param_any(request, "owner_id", "ownerId"),
+        owner_label: query_param_any(request, "owner_label", "ownerLabel"),
+        workspace_id: query_param_any(request, "workspace_id", "workspaceId"),
+        pool_id: query_param_any(request, "pool_id", "poolId"),
+        installation_id: query_param_any(request, "installation_id", "installationId"),
+        device_id: query_param_any(request, "device_id", "deviceId"),
+        device_label: query_param_any(request, "device_label", "deviceLabel"),
+        browser_kind: query_param_any(request, "browser_kind", "browserKind"),
+        browser_label: query_param_any(request, "browser_label", "browserLabel")
+            .or_else(|| query_param_nonempty(request, "browserName")),
+        platform: query_param_nonempty(request, "platform"),
+        profile_label: query_param_any(request, "profile_label", "profileLabel"),
+        last_seen_at: query_param_any(request, "last_seen_at", "lastSeenAt"),
+    }
+}
+
+fn query_param_any(request: &HttpRequest, snake_name: &str, camel_name: &str) -> Option<String> {
+    query_param_nonempty(request, snake_name).or_else(|| query_param_nonempty(request, camel_name))
+}
+
+fn query_param_nonempty(request: &HttpRequest, name: &str) -> Option<String> {
+    query_param(&request.target, name)
+        .or_else(|| query_param(&request.body, name))
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
 }
 
 fn query_param(target: &str, name: &str) -> Option<String> {
@@ -696,5 +727,33 @@ mod tests {
 
         assert!(has_valid_control_token(&request, "secret"));
         assert!(!has_valid_control_token(&request, "other"));
+    }
+
+    #[test]
+    fn parses_share_metadata_from_camel_case_form_body() {
+        let body = "shareUrl=https%3A%2F%2Frelay.example%2Fshare%2Fs1%23agent%3Da1&ownerId=user-1&ownerLabel=Alice&workspaceId=workspace-1&poolId=current-runtime&installationId=install-1&deviceId=device-1&deviceLabel=Work+laptop&browserKind=edge&browserLabel=Edge&platform=Windows&profileLabel=default";
+        let request = parse_http_request(
+            format!(
+                "POST /api/share HTTP/1.1\r\nContent-Length: {}\r\n\r\n{}",
+                body.len(),
+                body
+            )
+            .as_bytes(),
+        )
+        .expect("request parses");
+
+        let metadata = share_metadata_from_request(&request);
+
+        assert_eq!(metadata.owner_id.as_deref(), Some("user-1"));
+        assert_eq!(metadata.owner_label.as_deref(), Some("Alice"));
+        assert_eq!(metadata.workspace_id.as_deref(), Some("workspace-1"));
+        assert_eq!(metadata.pool_id.as_deref(), Some("current-runtime"));
+        assert_eq!(metadata.installation_id.as_deref(), Some("install-1"));
+        assert_eq!(metadata.device_id.as_deref(), Some("device-1"));
+        assert_eq!(metadata.device_label.as_deref(), Some("Work laptop"));
+        assert_eq!(metadata.browser_kind.as_deref(), Some("edge"));
+        assert_eq!(metadata.browser_label.as_deref(), Some("Edge"));
+        assert_eq!(metadata.platform.as_deref(), Some("Windows"));
+        assert_eq!(metadata.profile_label.as_deref(), Some("default"));
     }
 }

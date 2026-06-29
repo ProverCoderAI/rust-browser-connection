@@ -31,7 +31,7 @@ async function loadRequest() {
   originEl.textContent = request.origin || "-";
   workspaceEl.textContent = request.workspaceId || request.poolId || "current-runtime";
   relayEl.textContent = request.relayUrl || "-";
-  statusEl.textContent = "Allow this page to control this Edge session through the relay.";
+  statusEl.textContent = "Allow this page to control this browser session through the relay.";
 }
 
 async function approve() {

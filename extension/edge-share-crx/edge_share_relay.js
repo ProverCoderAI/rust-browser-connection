@@ -26,6 +26,16 @@ let state = {
   platformHref: "",
   workspaceId: "",
   poolId: "",
+  ownerId: "",
+  ownerLabel: "",
+  installationId: "",
+  deviceId: "",
+  deviceLabel: "",
+  browserKind: "",
+  browserLabel: "",
+  platform: "",
+  profileLabel: "",
+  targetName: "",
   browserName: "",
   recording: false,
   recordingTabId: null,
@@ -171,11 +181,16 @@ async function handleExtensionMessage(message, sender) {
 }
 
 async function startShare(relayUrlInput, options = {}) {
+  await ensureIdentity();
   const relayUrl = normalizeRelayUrl(relayUrlInput);
   const sessionId = randomHex(12);
   const browserToken = randomHex(24);
   const agentToken = randomHex(24);
   const shareUrl = buildShareUrl(relayUrl, sessionId, agentToken);
+  const browserKind = stringParam(options.browserKind) || detectBrowserKind();
+  const browserLabel = stringParam(options.browserLabel || options.browserName) || browserLabelForKind(browserKind);
+  const platform = stringParam(options.platform) || detectPlatform();
+  const deviceLabel = stringParam(options.deviceLabel) || `${browserLabel} on ${platform}`;
 
   intentionallyClosed = false;
   reconnectDelayMs = RECONNECT_MIN_MS;
@@ -195,7 +210,15 @@ async function startShare(relayUrlInput, options = {}) {
     platformHref: options.platformHref || "",
     workspaceId: options.workspaceId || "",
     poolId: options.poolId || "",
-    browserName: options.browserName || ""
+    ownerId: options.ownerId || "",
+    ownerLabel: options.ownerLabel || "",
+    deviceLabel,
+    browserKind,
+    browserLabel,
+    platform,
+    profileLabel: options.profileLabel || "default",
+    targetName: options.targetName || "",
+    browserName: browserLabel
   });
 
   connectRelay();
@@ -238,6 +261,9 @@ async function stopShare() {
     platformHref: "",
     workspaceId: "",
     poolId: "",
+    ownerId: "",
+    ownerLabel: "",
+    targetName: "",
     browserName: ""
   });
 
@@ -249,6 +275,40 @@ async function restoreState() {
   if (stored && stored[STORAGE_KEY]) {
     state = { ...state, ...stored[STORAGE_KEY] };
   }
+  await ensureIdentity();
+}
+
+async function ensureIdentity() {
+  const patch = {};
+  if (!state.installationId) {
+    patch.installationId = randomHex(16);
+  }
+  if (!state.deviceId) {
+    patch.deviceId = patch.installationId || state.installationId || randomHex(16);
+  }
+  if (!state.browserKind) {
+    patch.browserKind = detectBrowserKind();
+  }
+  if (!state.browserLabel) {
+    patch.browserLabel = browserLabelForKind(patch.browserKind || state.browserKind);
+  }
+  if (!state.platform) {
+    patch.platform = detectPlatform();
+  }
+  if (!state.deviceLabel) {
+    patch.deviceLabel = `${patch.browserLabel || state.browserLabel || "Browser"} on ${patch.platform || state.platform || "unknown"}`;
+  }
+  if (!Object.keys(patch).length) {
+    return;
+  }
+  state = {
+    ...state,
+    ...patch,
+    updatedAt: new Date().toISOString()
+  };
+  await chromeCall(chrome.storage.local.set, chrome.storage.local, {
+    [STORAGE_KEY]: state
+  });
 }
 
 async function persistState(patch) {
@@ -284,6 +344,16 @@ function publicState() {
     platformOrigin: state.platformOrigin,
     workspaceId: state.workspaceId,
     poolId: state.poolId,
+    ownerId: state.ownerId,
+    ownerLabel: state.ownerLabel,
+    installationId: state.installationId,
+    deviceId: state.deviceId,
+    deviceLabel: state.deviceLabel,
+    browserKind: state.browserKind,
+    browserLabel: state.browserLabel,
+    platform: state.platform,
+    profileLabel: state.profileLabel,
+    targetName: state.targetName,
     browserName: state.browserName,
     updatedAt: state.updatedAt
   };
@@ -476,7 +546,14 @@ async function handlePlatformRequest(message, sender) {
     tabId: sender.tab.id,
     workspaceId: stringParam(params.workspaceId),
     poolId: stringParam(params.poolId),
-    browserName: stringParam(params.displayName || params.browserName) || "Edge",
+    ownerId: stringParam(params.ownerId),
+    ownerLabel: stringParam(params.ownerLabel),
+    targetName: stringParam(params.targetName),
+    deviceLabel: stringParam(params.deviceLabel),
+    browserKind: stringParam(params.browserKind),
+    browserLabel: stringParam(params.browserLabel || params.displayName || params.browserName),
+    profileLabel: stringParam(params.profileLabel) || "default",
+    browserName: stringParam(params.displayName || params.browserName || params.browserLabel) || browserLabelForKind(detectBrowserKind()),
     relayUrl: normalizeRelayUrl(stringParam(params.relayUrl) || pageUrl.origin),
     createdAt: Date.now()
   };
@@ -541,6 +618,13 @@ async function tryReusePlatformShare(request) {
     platformHref: request.href,
     workspaceId: request.workspaceId,
     poolId: request.poolId,
+    ownerId: request.ownerId,
+    ownerLabel: request.ownerLabel,
+    targetName: request.targetName,
+    deviceLabel: request.deviceLabel || state.deviceLabel,
+    browserKind: request.browserKind || detectBrowserKind(),
+    browserLabel: request.browserLabel || request.browserName || state.browserLabel,
+    profileLabel: request.profileLabel,
     browserName: request.browserName,
     relayUrl: request.relayUrl,
     lastError: "",
@@ -559,6 +643,16 @@ async function tryReusePlatformShare(request) {
     platformOrigin: request.origin,
     workspaceId: request.workspaceId,
     poolId: request.poolId,
+    ownerId: state.ownerId,
+    ownerLabel: state.ownerLabel,
+    installationId: state.installationId,
+    deviceId: state.deviceId,
+    deviceLabel: state.deviceLabel,
+    browserKind: state.browserKind,
+    browserLabel: state.browserLabel,
+    platform: state.platform,
+    profileLabel: state.profileLabel,
+    targetName: state.targetName,
     browserName: request.browserName
   };
 }
@@ -588,6 +682,13 @@ async function approvePlatformConnect(requestId) {
       platformHref: entry.request.href,
       workspaceId: entry.request.workspaceId,
       poolId: entry.request.poolId,
+      ownerId: entry.request.ownerId,
+      ownerLabel: entry.request.ownerLabel,
+      targetName: entry.request.targetName,
+      deviceLabel: entry.request.deviceLabel,
+      browserKind: entry.request.browserKind,
+      browserLabel: entry.request.browserLabel,
+      profileLabel: entry.request.profileLabel,
       browserName: entry.request.browserName
     });
     started = true;
@@ -603,6 +704,16 @@ async function approvePlatformConnect(requestId) {
       platformOrigin: entry.request.origin,
       workspaceId: entry.request.workspaceId,
       poolId: entry.request.poolId,
+      ownerId: result.ownerId,
+      ownerLabel: result.ownerLabel,
+      installationId: result.installationId,
+      deviceId: result.deviceId,
+      deviceLabel: result.deviceLabel,
+      browserKind: result.browserKind,
+      browserLabel: result.browserLabel,
+      platform: result.platform,
+      profileLabel: result.profileLabel,
+      targetName: result.targetName,
       browserName: entry.request.browserName
     };
     entry.resolve(response);
@@ -638,10 +749,50 @@ function sanitizePlatformRequest(request) {
     title: request.title,
     workspaceId: request.workspaceId,
     poolId: request.poolId,
+    ownerId: request.ownerId,
+    ownerLabel: request.ownerLabel,
+    targetName: request.targetName,
+    deviceLabel: request.deviceLabel,
+    browserKind: request.browserKind,
+    browserLabel: request.browserLabel,
+    profileLabel: request.profileLabel,
     browserName: request.browserName,
     relayUrl: request.relayUrl,
     createdAt: request.createdAt
   };
+}
+
+function detectBrowserKind() {
+  const nav = typeof navigator === "undefined" ? null : navigator;
+  const ua = (nav && nav.userAgent ? nav.userAgent : "").toLowerCase();
+  if (ua.includes("edg/")) return "edge";
+  if (ua.includes("opr/") || ua.includes("opera")) return "opera";
+  if (ua.includes("firefox/")) return "firefox";
+  if (ua.includes("chrome/") || ua.includes("chromium/")) return "chrome";
+  if (ua.includes("safari/")) return "safari";
+  return "browser";
+}
+
+function browserLabelForKind(kind) {
+  const normalized = String(kind || "").toLowerCase();
+  if (normalized === "edge") return "Edge";
+  if (normalized === "chrome") return "Chrome";
+  if (normalized === "chromium") return "Chromium";
+  if (normalized === "firefox") return "Firefox";
+  if (normalized === "safari") return "Safari";
+  if (normalized === "opera") return "Opera";
+  return "Browser";
+}
+
+function detectPlatform() {
+  const nav = typeof navigator === "undefined" ? null : navigator;
+  if (nav && nav.userAgentData && nav.userAgentData.platform) {
+    return nav.userAgentData.platform;
+  }
+  if (nav && nav.platform) {
+    return nav.platform;
+  }
+  return "unknown";
 }
 
 async function waitForRelayConnection(timeoutMs) {

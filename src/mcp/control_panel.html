@@ -767,13 +767,13 @@ label {
     </div>
 
     <div class="side-section">
-      <button id="connectEdgeButton" type="button">Connect Edge</button>
-      <div id="connectStatus" class="connect-status">Checking Edge extension</div>
+      <button id="connectBrowserButton" type="button">Connect browser</button>
+      <div id="connectStatus" class="connect-status">Checking browser extension</div>
     </div>
 
     <div class="side-section share-grid">
       <label for="shareName">Shared browser link</label>
-      <input id="shareName" value="edge" autocomplete="off" spellcheck="false">
+      <input id="shareName" placeholder="Optional target name" autocomplete="off" spellcheck="false">
       <input id="shareUrl" placeholder="Paste browser share link" autocomplete="off" spellcheck="false">
       <button id="shareButton" type="button">Add shared browser</button>
     </div>
@@ -861,7 +861,7 @@ label {
               <button id="clearRecordingButton" class="secondary-button small-button" type="button">Clear</button>
               <button id="copyRecordingButton" class="secondary-button small-button" type="button">Copy script</button>
             </div>
-            <textarea id="recordedScript" class="recorded-script" readonly spellcheck="false" placeholder="Records actions from all http/https Edge tabs where the extension is active."></textarea>
+            <textarea id="recordedScript" class="recorded-script" readonly spellcheck="false" placeholder="Records actions from all http/https browser tabs where the extension is active."></textarea>
             <div id="recordedActions" class="recorded-actions"></div>
           </div>
           <div class="event-toolbar" aria-label="Filter agent actions">
@@ -899,7 +899,6 @@ label {
 const personalName = "__PERSONAL_BROWSER_NAME__";
 const projectId = "__PROJECT_ID__";
 const controlToken = "__CONTROL_TOKEN__";
-const edgeBrowserName = "edge";
 let lastActive = "";
 let autoConnectStarted = false;
 let autoReconnectStarted = false;
@@ -948,7 +947,7 @@ function renderInventory(inventory) {
   text("novncUrl", active?.novncUrl || "-");
 
   const shared = active?.kind === "shared-extension";
-  setBadge("connectionBadge", active ? (shared ? "Shared Edge" : "Connected") : "No target", active ? (shared ? "info" : "ok") : "warn");
+  setBadge("connectionBadge", active ? (shared ? "Shared browser" : "Connected") : "No target", active ? (shared ? "info" : "ok") : "warn");
   text("targetTitle", active ? browserLabel(active) : "Waiting for browser");
   text("targetSubtitle", active ? targetSubtitle(active) : "Select a browser target in the sidebar.");
   setFrame(active?.novncUrl || "", shared);
@@ -957,7 +956,11 @@ function renderInventory(inventory) {
 function browserLabel(browser) {
   const name = browser?.name || "-";
   if (name === personalName) return "personal";
-  if (browser?.kind === "shared-extension") return name + " shared Edge";
+  if (browser?.kind === "shared-extension") {
+    const label = browser.browserLabel || browser.browserKind || "browser";
+    const owner = browser.ownerLabel || browser.ownerId || "";
+    return owner ? name + " shared " + label + " (" + owner + ")" : name + " shared " + label;
+  }
   return name;
 }
 
@@ -987,7 +990,7 @@ function setFrame(url, showActivity) {
     lastActive = "";
     if (!activityVisible) {
       text("emptyTitle", "No live display");
-      text("emptyMessage", "The active target has no noVNC URL. Shared Edge activity appears here when the Edge extension is connected.");
+      text("emptyMessage", "The active target has no noVNC URL. Shared browser activity appears here when the browser extension is connected.");
     }
     return;
   }
@@ -1008,13 +1011,13 @@ async function selectBrowser() {
   await loadInventory();
 }
 
-async function connectEdge(auto) {
+async function connectSharedBrowser(auto) {
   if (!window.browserConnection || typeof window.browserConnection.request !== "function") {
-    setConnectStatus("Edge Share extension is not available on this page.");
+    setConnectStatus("Browser Connection extension is not available on this page.");
     return;
   }
 
-  setConnectStatus(auto ? "Requesting Edge connection" : "Opening Edge connection request");
+  setConnectStatus(auto ? "Requesting browser connection" : "Opening browser connection request");
   const result = await window.browserConnection.request({
     method: "connect",
     params: {
@@ -1022,60 +1025,76 @@ async function connectEdge(auto) {
       relayUrl: window.location.origin,
       workspaceId: projectId,
       poolId: "current-runtime",
-      browserName: edgeBrowserName,
-      displayName: "Edge"
+      ownerId: projectId,
+      ownerLabel: projectId
     }
   });
   if (!result || !result.shareUrl) {
-    throw new Error("Edge extension did not return a share URL");
+    throw new Error("Browser extension did not return a share URL");
   }
-  await registerShare(edgeBrowserName, result.shareUrl);
-  setConnectStatus("Connected as edge.");
+  const response = await registerShare(result.targetName || "", result.shareUrl, result);
+  const selected = response?.selected || response?.browser?.name || result.targetName || "shared browser";
+  setConnectStatus("Connected as " + selected + ".");
 }
 
-async function registerShare(name, shareUrl) {
-  const body = new URLSearchParams({ name, share_url: shareUrl });
+async function registerShare(name, shareUrl, metadata = {}) {
+  const body = new URLSearchParams({ share_url: shareUrl });
+  if (name) body.set("name", name);
+  const defaults = {
+    workspaceId: projectId,
+    poolId: "current-runtime",
+    ownerId: projectId,
+    ownerLabel: projectId
+  };
+  const fields = { ...defaults, ...metadata };
+  for (const [key, value] of Object.entries(fields)) {
+    if (value === undefined || value === null || value === "") continue;
+    if (key === "shareUrl" || key === "share_url") continue;
+    body.set(key, String(value));
+  }
   const response = await apiFetch("/api/share", {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
     body
   });
   if (!response.ok) throw new Error(await response.text());
+  const value = await response.json();
   await loadInventory();
+  return value;
 }
 
-function maybeAutoConnectEdge() {
+function maybeAutoConnectBrowser() {
   if (!window.browserConnection || typeof window.browserConnection.request !== "function") {
-    setConnectStatus("Install or enable Edge Share extension to connect this Edge.");
+    setConnectStatus("Install or enable Browser Connection extension to connect this browser.");
     return;
   }
   if (autoConnectStarted) return;
   autoConnectStarted = true;
   const key = "browserConnectionAutoConnect:" + window.location.origin + window.location.pathname;
-  if (sessionStorage.getItem(key) === "1" && edgeIsRegistered()) {
-    setConnectStatus("Edge Share extension detected.");
+  if (sessionStorage.getItem(key) === "1" && sharedBrowserIsRegistered()) {
+    setConnectStatus("Browser Connection extension detected.");
     return;
   }
   sessionStorage.setItem(key, "1");
-  connectEdge(true).catch(error => setConnectStatus(error.message || String(error)));
+  connectSharedBrowser(true).catch(error => setConnectStatus(error.message || String(error)));
 }
 
-function maybeReconnectEdgeAfterTabsError(error) {
+function maybeReconnectSharedBrowserAfterTabsError(error) {
   if (!error || autoReconnectStarted) return;
   const active = (latestInventory?.browsers || []).find(browser => browser.active) || null;
-  if (active?.kind !== "shared-extension" || active.name !== edgeBrowserName) return;
+  if (active?.kind !== "shared-extension") return;
   if (!window.browserConnection || typeof window.browserConnection.request !== "function") {
-    setConnectStatus("Shared Edge link is stale. Enable the Edge extension to reconnect.");
+    setConnectStatus("Shared browser link is stale. Enable the browser extension to reconnect.");
     return;
   }
   autoReconnectStarted = true;
   sessionStorage.removeItem("browserConnectionAutoConnect:" + window.location.origin + window.location.pathname);
-  setConnectStatus("Shared Edge link is stale. Requesting a new Edge connection.");
-  connectEdge(true).catch(error => setConnectStatus(error.message || String(error)));
+  setConnectStatus("Shared browser link is stale. Requesting a new browser connection.");
+  connectSharedBrowser(true).catch(error => setConnectStatus(error.message || String(error)));
 }
 
-function edgeIsRegistered() {
-  return (latestInventory?.browsers || []).some(browser => browser.name === edgeBrowserName && browser.kind === "shared-extension");
+function sharedBrowserIsRegistered() {
+  return (latestInventory?.browsers || []).some(browser => browser.kind === "shared-extension");
 }
 
 async function loadActivity() {
@@ -1112,7 +1131,7 @@ function renderActivity(activity) {
   const err = document.getElementById("tabsError");
   err.hidden = !activity.tabsError;
   err.textContent = activity.tabsError || "";
-  maybeReconnectEdgeAfterTabsError(activity.tabsError || "");
+  maybeReconnectSharedBrowserAfterTabsError(activity.tabsError || "");
   renderScreenshot(activity.latestScreenshot, shots);
   renderTabs(lastWindows);
   renderEvents(events);
@@ -1262,7 +1281,7 @@ function renderRecording(recording) {
   }
   if (!actions.length) {
     const inspect = latestRecording.lastInspect?.selector ? " Inspect target: " + latestRecording.lastInspect.selector : "";
-    list.replaceChildren(el("div", { className: "empty-list" }, "Press Record, then use any http/https tab in this Edge profile." + inspect));
+    list.replaceChildren(el("div", { className: "empty-list" }, "Press Record, then use any http/https tab in this browser profile." + inspect));
     return;
   }
   const rows = actions.slice(-12).reverse().map(action => {
@@ -1486,12 +1505,12 @@ document.getElementById("selectButton").addEventListener("click", () => {
 document.getElementById("browserSelect").addEventListener("change", () => {
   selectBrowser().catch(error => console.error(error));
 });
-document.getElementById("connectEdgeButton").addEventListener("click", () => {
+document.getElementById("connectBrowserButton").addEventListener("click", () => {
   sessionStorage.removeItem("browserConnectionAutoConnect:" + window.location.origin + window.location.pathname);
-  connectEdge(false).catch(error => setConnectStatus(error.message || String(error)));
+  connectSharedBrowser(false).catch(error => setConnectStatus(error.message || String(error)));
 });
 document.getElementById("shareButton").addEventListener("click", async () => {
-  const name = document.getElementById("shareName").value.trim() || "edge";
+  const name = document.getElementById("shareName").value.trim();
   const shareUrl = document.getElementById("shareUrl").value.trim();
   if (!shareUrl) return;
   await registerShare(name, shareUrl);
@@ -1528,8 +1547,8 @@ document.getElementById("copyRecordingButton").addEventListener("click", async (
 for (const button of document.querySelectorAll("[data-event-filter]")) {
   button.addEventListener("click", () => setEventFilter(button.dataset.eventFilter || "all"));
 }
-window.addEventListener("browserConnection#initialized", maybeAutoConnectEdge);
-setTimeout(maybeAutoConnectEdge, 300);
+window.addEventListener("browserConnection#initialized", maybeAutoConnectBrowser);
+setTimeout(maybeAutoConnectBrowser, 300);
 loadInventory().catch(error => console.error(error));
 setInterval(() => loadInventory().catch(error => console.error(error)), 1000);
 setInterval(() => loadActivity().catch(error => console.error(error)), 1000);

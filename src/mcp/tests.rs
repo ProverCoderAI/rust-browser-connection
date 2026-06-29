@@ -342,6 +342,112 @@ fn browser_list_reports_active_shared_browser_without_cdp() {
 }
 
 #[test]
+fn browser_list_reports_shared_browser_metadata() {
+    let metadata = BrowserEndpointMetadata {
+        owner_id: Some("user-1".to_string()),
+        owner_label: Some("Alice".to_string()),
+        workspace_id: Some("workspace-1".to_string()),
+        pool_id: Some("current-runtime".to_string()),
+        installation_id: Some("install-abcdef".to_string()),
+        device_id: Some("device-abcdef".to_string()),
+        device_label: Some("Work laptop".to_string()),
+        browser_kind: Some("edge".to_string()),
+        browser_label: Some("Edge".to_string()),
+        platform: Some("Windows".to_string()),
+        profile_label: Some("default".to_string()),
+        last_seen_at: Some("2026-06-29T00:00:00Z".to_string()),
+    };
+    let config = McpServerConfig::new("dg-test", None, None, false)
+        .with_browser_endpoints(vec![NamedBrowserEndpoint::shared(
+            "alice-edge",
+            "https://relay.example/share/s1#agent=a1",
+        )
+        .expect("shared endpoint is valid")
+        .with_metadata(metadata)])
+        .with_active_browser(Some("alice-edge".to_string()))
+        .expect("active browser name is valid");
+    let runtime = McpRuntime::new(config).expect("runtime config is valid");
+
+    let inventory = runtime.browser_inventory().expect("inventory renders");
+    let browser = inventory["browsers"]
+        .as_array()
+        .expect("browsers array")
+        .iter()
+        .find(|browser| browser["name"] == "alice-edge")
+        .expect("shared browser exists");
+
+    assert_eq!(browser["kind"], "shared-extension");
+    assert_eq!(browser["connected"], true);
+    assert_eq!(browser["ownerId"], "user-1");
+    assert_eq!(browser["ownerLabel"], "Alice");
+    assert_eq!(browser["workspaceId"], "workspace-1");
+    assert_eq!(browser["poolId"], "current-runtime");
+    assert_eq!(browser["installationId"], "install-abcdef");
+    assert_eq!(browser["deviceId"], "device-abcdef");
+    assert_eq!(browser["deviceLabel"], "Work laptop");
+    assert_eq!(browser["browserKind"], "edge");
+    assert_eq!(browser["browserLabel"], "Edge");
+    assert_eq!(browser["platform"], "Windows");
+    assert_eq!(browser["profileLabel"], "default");
+    assert_eq!(browser["lastSeenAt"], "2026-06-29T00:00:00Z");
+}
+
+#[test]
+fn register_shared_browser_generates_and_reuses_stable_target_name() {
+    let mut runtime = McpRuntime::new(McpServerConfig::new("dg-test", None, None, false))
+        .expect("runtime config is valid");
+    let metadata = BrowserEndpointMetadata {
+        owner_label: Some("Alice Smith".to_string()),
+        workspace_id: Some("workspace-1".to_string()),
+        installation_id: Some("install-abcdef".to_string()),
+        device_label: Some("Work laptop".to_string()),
+        browser_kind: Some("edge".to_string()),
+        browser_label: Some("Edge".to_string()),
+        platform: Some("Windows".to_string()),
+        ..Default::default()
+    };
+
+    let first = runtime
+        .register_shared_browser(
+            None,
+            "https://relay.example/share/s1#agent=a1",
+            metadata.clone(),
+        )
+        .expect("shared browser registers");
+    let first: Value = serde_json::from_str(&first).expect("selection is JSON");
+    let target = first["selected"]
+        .as_str()
+        .expect("selected browser is a string")
+        .to_string();
+    assert!(target.starts_with("alice-smith-edge-work-laptop-install"));
+
+    let mut second_metadata = metadata;
+    second_metadata.owner_label = Some("Alice Updated".to_string());
+    let second = runtime
+        .register_shared_browser(
+            None,
+            "https://relay.example/share/s2#agent=a2",
+            second_metadata,
+        )
+        .expect("shared browser re-registers");
+    let second: Value = serde_json::from_str(&second).expect("selection is JSON");
+    assert_eq!(second["selected"], target);
+
+    let inventory = runtime.browser_inventory().expect("inventory renders");
+    let browser = inventory["browsers"]
+        .as_array()
+        .expect("browsers array")
+        .iter()
+        .find(|browser| browser["name"] == target)
+        .expect("shared browser exists");
+    assert_eq!(
+        browser["shareUrl"],
+        "https://relay.example/share/s2#agent=a2"
+    );
+    assert_eq!(browser["ownerLabel"], "Alice Updated");
+}
+
+#[test]
 fn browser_list_reports_control_panel_url_when_enabled() {
     let config = McpServerConfig::new("dg-test", None, None, false).with_control_port(Some(6888));
     let runtime = McpRuntime::new(config).expect("runtime config is valid");

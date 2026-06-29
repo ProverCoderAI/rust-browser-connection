@@ -13,6 +13,63 @@ pub struct NamedBrowserEndpoint {
     pub vnc_endpoint: Option<String>,
     pub novnc_url: Option<String>,
     pub share_url: Option<String>,
+    #[serde(default)]
+    pub metadata: BrowserEndpointMetadata,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BrowserEndpointMetadata {
+    pub owner_id: Option<String>,
+    pub owner_label: Option<String>,
+    pub workspace_id: Option<String>,
+    pub pool_id: Option<String>,
+    pub installation_id: Option<String>,
+    pub device_id: Option<String>,
+    pub device_label: Option<String>,
+    pub browser_kind: Option<String>,
+    pub browser_label: Option<String>,
+    pub platform: Option<String>,
+    pub profile_label: Option<String>,
+    pub last_seen_at: Option<String>,
+}
+
+impl BrowserEndpointMetadata {
+    pub fn merge_missing_from(&mut self, other: &Self) {
+        merge_option(&mut self.owner_id, &other.owner_id);
+        merge_option(&mut self.owner_label, &other.owner_label);
+        merge_option(&mut self.workspace_id, &other.workspace_id);
+        merge_option(&mut self.pool_id, &other.pool_id);
+        merge_option(&mut self.installation_id, &other.installation_id);
+        merge_option(&mut self.device_id, &other.device_id);
+        merge_option(&mut self.device_label, &other.device_label);
+        merge_option(&mut self.browser_kind, &other.browser_kind);
+        merge_option(&mut self.browser_label, &other.browser_label);
+        merge_option(&mut self.platform, &other.platform);
+        merge_option(&mut self.profile_label, &other.profile_label);
+        merge_option(&mut self.last_seen_at, &other.last_seen_at);
+    }
+
+    pub fn merge_from(&mut self, other: &Self) {
+        replace_option(&mut self.owner_id, &other.owner_id);
+        replace_option(&mut self.owner_label, &other.owner_label);
+        replace_option(&mut self.workspace_id, &other.workspace_id);
+        replace_option(&mut self.pool_id, &other.pool_id);
+        replace_option(&mut self.installation_id, &other.installation_id);
+        replace_option(&mut self.device_id, &other.device_id);
+        replace_option(&mut self.device_label, &other.device_label);
+        replace_option(&mut self.browser_kind, &other.browser_kind);
+        replace_option(&mut self.browser_label, &other.browser_label);
+        replace_option(&mut self.platform, &other.platform);
+        replace_option(&mut self.profile_label, &other.profile_label);
+        replace_option(&mut self.last_seen_at, &other.last_seen_at);
+    }
+
+    pub fn stable_identity(&self) -> Option<&str> {
+        self.installation_id
+            .as_deref()
+            .or(self.device_id.as_deref())
+            .filter(|value| !value.trim().is_empty())
+    }
 }
 
 impl NamedBrowserEndpoint {
@@ -25,6 +82,7 @@ impl NamedBrowserEndpoint {
             vnc_endpoint: None,
             novnc_url: None,
             share_url: None,
+            metadata: BrowserEndpointMetadata::default(),
         })
     }
 
@@ -37,6 +95,7 @@ impl NamedBrowserEndpoint {
             vnc_endpoint: None,
             novnc_url: None,
             share_url: Some(share_url),
+            metadata: BrowserEndpointMetadata::default(),
         })
     }
 
@@ -53,6 +112,11 @@ impl NamedBrowserEndpoint {
     pub fn with_share_url(mut self, share_url: impl AsRef<str>) -> Result<Self> {
         self.share_url = Some(normalize_share_url(share_url.as_ref())?);
         Ok(self)
+    }
+
+    pub fn with_metadata(mut self, metadata: BrowserEndpointMetadata) -> Self {
+        self.metadata = metadata;
+        self
     }
 }
 
@@ -292,6 +356,7 @@ pub(crate) fn upsert_browser_endpoint(
         let vnc_endpoint = existing.vnc_endpoint.clone();
         let novnc_url = existing.novnc_url.clone();
         let share_url = existing.share_url.clone();
+        let metadata = existing.metadata.clone();
         *existing = endpoint;
         if existing.vnc_endpoint.is_none() {
             existing.vnc_endpoint = vnc_endpoint;
@@ -302,6 +367,7 @@ pub(crate) fn upsert_browser_endpoint(
         if existing.share_url.is_none() {
             existing.share_url = share_url;
         }
+        existing.metadata.merge_missing_from(&metadata);
     } else {
         endpoints.push(endpoint);
     }
@@ -321,6 +387,7 @@ pub(crate) fn upsert_browser_vnc_endpoint(
             vnc_endpoint: Some(vnc_endpoint),
             novnc_url: None,
             share_url: None,
+            metadata: BrowserEndpointMetadata::default(),
         });
     }
 }
@@ -339,6 +406,7 @@ pub(crate) fn upsert_browser_novnc_url(
             vnc_endpoint: None,
             novnc_url: Some(novnc_url),
             share_url: None,
+            metadata: BrowserEndpointMetadata::default(),
         });
     }
 }
@@ -357,7 +425,18 @@ pub(crate) fn upsert_browser_share_url(
             vnc_endpoint: None,
             novnc_url: None,
             share_url: Some(share_url),
+            metadata: BrowserEndpointMetadata::default(),
         });
+    }
+}
+
+pub(crate) fn upsert_browser_metadata(
+    endpoints: &mut [NamedBrowserEndpoint],
+    name: &str,
+    metadata: &BrowserEndpointMetadata,
+) {
+    if let Some(existing) = endpoints.iter_mut().find(|existing| existing.name == name) {
+        existing.metadata.merge_from(metadata);
     }
 }
 
@@ -376,6 +455,19 @@ fn nonempty_env(name: &str) -> Option<String> {
         .ok()
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
+}
+
+fn merge_option(target: &mut Option<String>, source: &Option<String>) {
+    if target.as_deref().unwrap_or("").trim().is_empty() {
+        *target = source.clone();
+    }
+}
+
+fn replace_option(target: &mut Option<String>, source: &Option<String>) {
+    if source.as_deref().unwrap_or("").trim().is_empty() {
+        return;
+    }
+    *target = source.clone();
 }
 
 #[cfg(test)]
@@ -429,6 +521,23 @@ mod tests {
 
         assert_eq!(name, "edge");
         assert_eq!(url, "https://relay.example/share/s1#agent=a1");
+    }
+
+    #[test]
+    fn deserializes_legacy_endpoint_without_metadata() {
+        let endpoint: NamedBrowserEndpoint = serde_json::from_str(
+            r#"{
+                "name": "edge",
+                "cdp_endpoint": "",
+                "vnc_endpoint": null,
+                "novnc_url": null,
+                "share_url": "https://relay.example/share/s1#agent=a1"
+            }"#,
+        )
+        .expect("legacy endpoint JSON deserializes");
+
+        assert_eq!(endpoint.name, "edge");
+        assert_eq!(endpoint.metadata, BrowserEndpointMetadata::default());
     }
 
     #[test]

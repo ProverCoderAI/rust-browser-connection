@@ -59,8 +59,43 @@ fn rbc_help_exposes_browser_actions_without_mcp() {
     assert!(stdout.contains("--share-url"));
     assert!(stdout.contains("--cdp-url"));
     assert!(stdout.contains("--control-url"));
+    assert!(stdout.contains("--list"));
     assert!(stdout.contains("Browser name"));
     assert!(!stdout.contains("--project"));
+}
+
+#[test]
+fn rbc_list_json_reads_browser_pool_without_target() {
+    let output = Command::new(env!("CARGO_BIN_EXE_rbc"))
+        .env_remove("BROWSER_CONNECTION_CONTROL_URL")
+        .env_remove("DOCKER_GIT_PROJECT_ID")
+        .env_remove("PROJECT_ID")
+        .env("BROWSER_CONNECTION_ACTIVE_BROWSER", "alice-edge")
+        .env(
+            "BROWSER_CONNECTION_BROWSER_SHARES",
+            "alice-edge=https://relay.example/share/s1#agent=a1",
+        )
+        .args(["--list", "--json"])
+        .output()
+        .expect("Failed to execute rbc");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).expect("stdout is JSON");
+    assert_eq!(value["active"], "alice-edge");
+    assert!(value["browsers"]
+        .as_array()
+        .expect("browsers array")
+        .iter()
+        .any(|browser| {
+            browser["name"] == "alice-edge"
+                && browser["kind"] == "shared-extension"
+                && browser["shareUrl"] == "https://relay.example/share/s1#agent=a1"
+                && browser["active"] == true
+        }));
 }
 
 #[test]

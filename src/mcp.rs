@@ -13,8 +13,8 @@ INVARIANT: browser tools always target the active CDP endpoint: managed, explici
 
 use crate::browser_target::{
     configured_browser_kind, normalize_browser_name, normalize_cdp_endpoint, normalize_novnc_url,
-    normalize_share_url, normalize_vnc_endpoint, upsert_browser_endpoint, upsert_browser_novnc_url,
-    upsert_browser_share_url, upsert_browser_vnc_endpoint,
+    normalize_share_url, normalize_vnc_endpoint, upsert_browser_endpoint, upsert_browser_metadata,
+    upsert_browser_novnc_url, upsert_browser_share_url, upsert_browser_vnc_endpoint,
 };
 use crate::shared_browser::SharedBrowserClient;
 use crate::{
@@ -39,8 +39,8 @@ pub use crate::browser_target::{
     active_browser_from_env, browser_endpoints_from_env, parse_named_browser_endpoint,
     parse_named_browser_endpoints, parse_named_browser_novnc_url, parse_named_browser_novnc_urls,
     parse_named_browser_share_url, parse_named_browser_share_urls,
-    parse_named_browser_vnc_endpoint, parse_named_browser_vnc_endpoints, NamedBrowserEndpoint,
-    EXPLICIT_BROWSER_NAME, MANAGED_BROWSER_NAME, PERSONAL_BROWSER_NAME,
+    parse_named_browser_vnc_endpoint, parse_named_browser_vnc_endpoints, BrowserEndpointMetadata,
+    NamedBrowserEndpoint, EXPLICIT_BROWSER_NAME, MANAGED_BROWSER_NAME, PERSONAL_BROWSER_NAME,
 };
 pub const SERVER_NAME: &str = "browser-connection";
 pub const MCP_PROTOCOL_VERSION: &str = "2025-11-25";
@@ -405,6 +405,7 @@ impl McpRuntime {
                 None,
                 "configured",
                 self.active_browser == EXPLICIT_BROWSER_NAME,
+                None,
             ));
         }
 
@@ -418,6 +419,7 @@ impl McpRuntime {
                 endpoint.share_url.clone(),
                 "configured",
                 self.active_browser == endpoint.name,
+                Some(&endpoint.metadata),
             ));
         }
 
@@ -454,6 +456,7 @@ impl McpRuntime {
             None,
             resolution,
             self.active_browser == MANAGED_BROWSER_NAME,
+            None,
         )
     }
 
@@ -464,6 +467,38 @@ impl McpRuntime {
         vnc_endpoint: Option<&str>,
         novnc_url: Option<&str>,
         share_url: Option<&str>,
+    ) -> Result<String> {
+        self.select_browser_with_metadata(
+            name,
+            cdp_endpoint,
+            vnc_endpoint,
+            novnc_url,
+            share_url,
+            None,
+        )
+    }
+
+    fn register_shared_browser(
+        &mut self,
+        name: Option<&str>,
+        share_url: &str,
+        metadata: BrowserEndpointMetadata,
+    ) -> Result<String> {
+        let name = match name.map(str::trim).filter(|value| !value.is_empty()) {
+            Some(name) => normalize_browser_name(name)?,
+            None => self.shared_browser_name_for_metadata(&metadata)?,
+        };
+        self.select_browser_with_metadata(&name, None, None, None, Some(share_url), Some(metadata))
+    }
+
+    fn select_browser_with_metadata(
+        &mut self,
+        name: &str,
+        cdp_endpoint: Option<&str>,
+        vnc_endpoint: Option<&str>,
+        novnc_url: Option<&str>,
+        share_url: Option<&str>,
+        metadata: Option<BrowserEndpointMetadata>,
     ) -> Result<String> {
         let name = normalize_browser_name(name)?;
 
@@ -512,6 +547,9 @@ impl McpRuntime {
                 normalize_share_url(url)?,
             );
         }
+        if let Some(metadata) = metadata {
+            upsert_browser_metadata(&mut self.config.browser_endpoints, &name, &metadata);
+        }
 
         self.ensure_browser_exists(&name)?;
 
@@ -531,6 +569,68 @@ impl McpRuntime {
                 .unwrap_or(Value::Null)
         }))
         .context("failed to render browser selection")
+    }
+
+    fn shared_browser_name_for_metadata(
+        &self,
+        metadata: &BrowserEndpointMetadata,
+    ) -> Result<String> {
+        if let Some(identity) = metadata.stable_identity() {
+            if let Some(existing) = self
+                .config
+                .browser_endpoints
+                .iter()
+                .find(|endpoint| endpoint.metadata.stable_identity() == Some(identity))
+            {
+                return Ok(existing.name.clone());
+            }
+        }
+
+        let owner = metadata
+            .owner_label
+            .as_deref()
+            .or(metadata.owner_id.as_deref())
+            .or(metadata.workspace_id.as_deref())
+            .unwrap_or("user");
+        let browser = metadata
+            .browser_label
+            .as_deref()
+            .or(metadata.browser_kind.as_deref())
+            .unwrap_or("browser");
+        let device = metadata
+            .device_label
+            .as_deref()
+            .or(metadata.platform.as_deref())
+            .unwrap_or("device");
+        let suffix = metadata
+            .stable_identity()
+            .map(short_identity)
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| "share".to_string());
+        let base = slug_from_parts([owner, browser, device, suffix.as_str()]);
+
+        for index in 0..1000 {
+            let candidate = if index == 0 {
+                base.clone()
+            } else {
+                format!("{base}-{}", index + 1)
+            };
+            if candidate == MANAGED_BROWSER_NAME || candidate == EXPLICIT_BROWSER_NAME {
+                continue;
+            }
+            if self
+                .config
+                .browser_endpoints
+                .iter()
+                .all(|endpoint| endpoint.name != candidate)
+            {
+                return Ok(candidate);
+            }
+        }
+
+        Err(anyhow!(
+            "failed to allocate shared browser name for metadata"
+        ))
     }
 
     fn ensure_browser_exists(&self, name: &str) -> Result<()> {
@@ -711,6 +811,50 @@ fn runtime_state_file_stem(project_id: &str) -> String {
     }
 }
 
+fn slug_from_parts<'a>(parts: impl IntoIterator<Item = &'a str>) -> String {
+    let slug = parts
+        .into_iter()
+        .filter_map(slug_part)
+        .collect::<Vec<_>>()
+        .join("-");
+    if slug.is_empty() {
+        "browser-share".to_string()
+    } else {
+        slug
+    }
+}
+
+fn slug_part(value: &str) -> Option<String> {
+    let mut output = String::new();
+    let mut last_was_dash = false;
+    for ch in value.trim().chars().flat_map(char::to_lowercase) {
+        if ch.is_ascii_alphanumeric() {
+            output.push(ch);
+            last_was_dash = false;
+        } else if !last_was_dash && !output.is_empty() {
+            output.push('-');
+            last_was_dash = true;
+        }
+    }
+    while output.ends_with('-') {
+        output.pop();
+    }
+    if output.is_empty() {
+        None
+    } else {
+        Some(output.chars().take(36).collect())
+    }
+}
+
+fn short_identity(value: &str) -> String {
+    value
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .take(8)
+        .collect()
+}
+
 #[allow(clippy::too_many_arguments)]
 fn browser_entry(
     name: &str,
@@ -721,7 +865,17 @@ fn browser_entry(
     share_url: Option<String>,
     resolution: &str,
     active: bool,
+    metadata: Option<&BrowserEndpointMetadata>,
 ) -> Value {
+    let metadata = metadata.cloned().unwrap_or_default();
+    let connected = cdp_endpoint
+        .as_deref()
+        .map(|value| !value.trim().is_empty())
+        .unwrap_or(false)
+        || share_url
+            .as_deref()
+            .map(|value| !value.trim().is_empty())
+            .unwrap_or(false);
     json!({
         "name": name,
         "kind": kind,
@@ -730,7 +884,21 @@ fn browser_entry(
         "novncUrl": novnc_url,
         "shareUrl": share_url,
         "resolution": resolution,
-        "active": active
+        "status": resolution,
+        "connected": connected,
+        "active": active,
+        "ownerId": metadata.owner_id,
+        "ownerLabel": metadata.owner_label,
+        "workspaceId": metadata.workspace_id,
+        "poolId": metadata.pool_id,
+        "installationId": metadata.installation_id,
+        "deviceId": metadata.device_id,
+        "deviceLabel": metadata.device_label,
+        "browserKind": metadata.browser_kind,
+        "browserLabel": metadata.browser_label,
+        "platform": metadata.platform,
+        "profileLabel": metadata.profile_label,
+        "lastSeenAt": metadata.last_seen_at
     })
 }
 
