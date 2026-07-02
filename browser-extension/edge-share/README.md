@@ -9,7 +9,7 @@ build step and no dependencies.
 1. Open `edge://extensions`.
 2. Enable `Developer mode`.
 3. Choose `Load unpacked`.
-4. Select this `extension/edge-share` directory.
+4. Select this `browser-extension/edge-share` directory.
 5. Open the extension popup, enter the relay URL, and click `Share`.
 
 ## Connect from browser-connection control panel

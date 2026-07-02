@@ -259,6 +259,7 @@ dependencies = [
  "anyhow",
  "clap",
  "env_logger",
+ "getrandom",
  "log",
  "proptest",
  "serde",

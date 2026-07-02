@@ -69,7 +69,7 @@ share extension plus the relay:
 browser-connection-relay --bind 127.0.0.1:8765
 ```
 
-In Edge, load `extension/edge-share` as an unpacked extension, open the extension popup, keep the
+In Edge, load `browser-extension/edge-share` as an unpacked extension, open the extension popup, keep the
 relay URL as `http://127.0.0.1:8765` for local testing or set your hosted relay URL, then click
 `Share` and copy the link.
 

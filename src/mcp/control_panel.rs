@@ -4,7 +4,7 @@ use anyhow::{anyhow, Context, Result};
 use serde_json::{json, Value};
 use std::env;
 use std::fmt::Write as _;
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
@@ -602,10 +602,7 @@ fn json_response(status: u16, reason: &'static str, value: Value) -> HttpRespons
 
 fn generate_control_token() -> Result<String> {
     let mut bytes = [0_u8; 32];
-    File::open("/dev/urandom")
-        .context("failed to open /dev/urandom for control panel token")?
-        .read_exact(&mut bytes)
-        .context("failed to read control panel token bytes")?;
+    getrandom::getrandom(&mut bytes).context("failed to generate control panel token bytes")?;
     let mut token = String::with_capacity(bytes.len() * 2);
     for byte in bytes {
         write!(&mut token, "{byte:02x}").expect("writing to a String cannot fail");
@@ -693,13 +690,16 @@ fn escape_js_string(value: &str) -> String {
 }
 
 fn control_panel_html(control_token: &str, project_id: &str) -> String {
-    include_str!("control_panel.html")
-        .replace(
-            "__PERSONAL_BROWSER_NAME__",
-            &escape_js_string(PERSONAL_BROWSER_NAME),
-        )
-        .replace("__PROJECT_ID__", &escape_js_string(project_id))
-        .replace("__CONTROL_TOKEN__", &escape_js_string(control_token))
+    include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/control-panel/index.html"
+    ))
+    .replace(
+        "__PERSONAL_BROWSER_NAME__",
+        &escape_js_string(PERSONAL_BROWSER_NAME),
+    )
+    .replace("__PROJECT_ID__", &escape_js_string(project_id))
+    .replace("__CONTROL_TOKEN__", &escape_js_string(control_token))
 }
 
 #[cfg(test)]
