@@ -1,0 +1,4 @@
+interface:
+  display_name: "Browser CLI"
+  short_description: "Automate browsers with rbc and Playwright"
+  default_prompt: "Use $browser-cli to inspect the current browser page and automate it with rbc or Playwright-over-CDP."

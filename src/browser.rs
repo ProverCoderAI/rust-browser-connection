@@ -14,6 +14,8 @@ EFFECT: Docker CLI process execution + temporary filesystem writes.
 INVARIANT: repeated ensure_browser_container(spec) reuses exactly spec.container_name.
 */
 
+mod assets;
+
 use anyhow::{anyhow, Context, Result};
 use std::fs;
 use std::net::{TcpStream, ToSocketAddrs};
@@ -21,7 +23,10 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use crate::{BrowserResourceLimits, BrowserSpec};
+use crate::{BrowserResourceLimits, BrowserSpec, BrowserTargetDisplaySpec};
+use assets::{
+    BROWSER_DOCKERFILE, BROWSER_START_SCRIPT, NOVNC_PROXY_DOCKERFILE, NOVNC_PROXY_START_SCRIPT,
+};
 
 pub(crate) struct BrowserRuntime {
     pub container_name: String,
@@ -29,63 +34,16 @@ pub(crate) struct BrowserRuntime {
     pub cdp_url: String,
 }
 
+pub(crate) struct BrowserTargetDisplayRuntime {
+    pub container_name: String,
+    pub vnc_endpoint: String,
+    pub novnc_url: String,
+}
+
 pub(crate) struct BrowserStopRuntime {
     pub container_name: String,
     pub removed: bool,
 }
-
-const BROWSER_DOCKERFILE: &str = r#"FROM kechangdev/browser-vnc:latest
-
-# bash/procps keep upstream startup scripts compatible; socat exposes a stable CDP port.
-# xwd/imagemagick provide deterministic X11 framebuffer screenshots for noVNC/CDP proof.
-RUN apk add --no-cache bash procps socat python3 net-tools curl xwd imagemagick
-
-# CHANGE: patch upstream noVNC/websockify for Python 3.12.
-# WHY: old websockify calls array.array.fromstring(), removed in Python 3.12, which closes noVNC after the RFB protocol banner.
-# QUOTE(ТЗ): "добиться что бы всё работало и этому были доказательства"
-# REF: issue-347
-# SOURCE: n/a
-# FORMAT THEOREM: websocket_rfb_handshake -> security_types_frame, not websockify_exception(fromstring)
-# PURITY: SHELL
-# EFFECT: Docker build mutates vendored websockify Python files in the browser image.
-# INVARIANT: noVNC connects to the same X11/VNC framebuffer that Chromium renders into.
-RUN python3 -c "from pathlib import Path; root=Path('/opt/noVNC/utils/websockify'); [p.write_text(p.read_text().replace('.fromstring(', '.frombytes(').replace('.tostring(', '.tobytes(')) for p in root.rglob('*.py')]"
-
-COPY docker-git-browser-start.sh /usr/local/bin/docker-git-browser-start.sh
-RUN chmod +x /usr/local/bin/docker-git-browser-start.sh
-
-ENTRYPOINT ["/usr/local/bin/docker-git-browser-start.sh"]
-"#;
-
-const BROWSER_START_SCRIPT: &str = r#"#!/usr/bin/env bash
-set -euo pipefail
-
-rm -f /data/SingletonLock /data/SingletonCookie /data/SingletonSocket || true
-
-# CHANGE: force no-password shared VNC for automatic noVNC proof/control.
-# WHY: docker-git's browser URL is opened by agents and users without a manual VNC password prompt.
-# QUOTE(ТЗ): "автоматически для него поднимает noVNC что бы управлять единым браузером с агентом"
-# REF: issue-347
-# SOURCE: n/a
-# FORMAT THEOREM: start_browser -> noVNC autoconnect reaches Chromium framebuffer
-# PURITY: SHELL
-# EFFECT: rewrites upstream supervisor config before /start.sh starts supervisord.
-# INVARIANT: x11vnc remains shared, so noVNC viewing does not disconnect the agent-controlled browser.
-for supervisor_file in /etc/supervisor.d/*.ini /etc/supervisor/conf.d/*.conf; do
-  if [[ -f "$supervisor_file" ]]; then
-    sed -i \
-      -e 's|-forever -usepw -display :99 -rfbport 5900|-forever -nopw -shared -display :99 -rfbport 5900|g' \
-      -e 's|x11vnc -forever -usepw|x11vnc -forever -nopw -shared|g' \
-      "$supervisor_file"
-  fi
-done
-
-# kechangdev/browser-vnc binds Chromium CDP on 127.0.0.1:9222.  MCP/Hermes use :9223.
-# The proxy keeps Host checks stable and makes the endpoint reachable from the project namespace.
-socat TCP-LISTEN:9223,fork,reuseaddr TCP:127.0.0.1:9222 &
-
-exec /start.sh
-"#;
 
 pub struct DockerBrowserShell;
 
@@ -157,6 +115,44 @@ impl DockerBrowserShell {
         Ok(BrowserStopRuntime {
             container_name: spec.container_name.clone(),
             removed,
+        })
+    }
+
+    pub fn ensure_novnc_proxy_container(
+        &self,
+        spec: &BrowserTargetDisplaySpec,
+    ) -> Result<BrowserTargetDisplayRuntime> {
+        ensure_docker_available()?;
+        ensure_novnc_proxy_image(spec)?;
+
+        let state = inspect_container_state(&spec.container_name)?;
+        match state.as_deref() {
+            Some("running") if novnc_proxy_matches(spec)? => {
+                let novnc_url = wait_for_novnc_proxy(spec)?;
+                return Ok(BrowserTargetDisplayRuntime {
+                    container_name: spec.container_name.clone(),
+                    vnc_endpoint: spec.vnc_endpoint.clone(),
+                    novnc_url,
+                });
+            }
+            Some(_) => {
+                docker(["rm", "-f", &spec.container_name], "docker rm noVNC proxy")?;
+            }
+            None => {}
+        }
+
+        let mut runtime_spec = spec.clone();
+        runtime_spec.network_mode = effective_network_mode(
+            &spec.network_mode,
+            referenced_container_state(&spec.network_mode)?.as_deref(),
+        );
+        run_novnc_proxy_container(&runtime_spec)?;
+        let novnc_url = wait_for_novnc_proxy(&runtime_spec)?;
+
+        Ok(BrowserTargetDisplayRuntime {
+            container_name: runtime_spec.container_name,
+            vnc_endpoint: runtime_spec.vnc_endpoint,
+            novnc_url,
         })
     }
 }
@@ -316,6 +312,41 @@ fn inspect_container_network_mode(container_name: &str) -> Result<Option<String>
     }
 }
 
+fn inspect_container_label(container_name: &str, label: &str) -> Result<Option<String>> {
+    let output = docker_command()
+        .args([
+            "inspect",
+            "-f",
+            &format!("{{{{ index .Config.Labels \"{label}\" }}}}"),
+            container_name,
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+        .with_context(|| {
+            format!("failed to inspect container label {label} for {container_name}")
+        })?;
+
+    if !output.status.success() {
+        return Ok(None);
+    }
+
+    let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if value.is_empty() || value == "<no value>" {
+        Ok(None)
+    } else {
+        Ok(Some(value))
+    }
+}
+
+fn novnc_proxy_matches(spec: &BrowserTargetDisplaySpec) -> Result<bool> {
+    Ok(
+        inspect_container_label(&spec.container_name, "docker-git.browser-vnc-endpoint")?
+            .as_deref()
+            == Some(spec.vnc_endpoint.as_str()),
+    )
+}
+
 // CHANGE: avoid `docker run --network container:<missing>` hard failure by falling back to bridge.
 // WHY: MCP stdio startup must work when launched before/without a docker-git project container.
 // QUOTE(ТЗ): "добить задачу ... поднятие MCP Playright вместе с noVNC"
@@ -370,6 +401,26 @@ fn ensure_browser_image(spec: &BrowserSpec) -> Result<()> {
             context.path_str(),
         ],
         "docker build browser image",
+    )?;
+    Ok(())
+}
+
+fn ensure_novnc_proxy_image(spec: &BrowserTargetDisplaySpec) -> Result<()> {
+    if image_exists(&spec.image_name)? {
+        return Ok(());
+    }
+
+    let context = NovncProxyBuildContext::create()?;
+    docker(
+        [
+            "build",
+            "-t",
+            &spec.image_name,
+            "-f",
+            context.dockerfile_path_str(),
+            context.path_str(),
+        ],
+        "docker build noVNC proxy image",
     )?;
     Ok(())
 }
@@ -436,6 +487,42 @@ fn run_browser_container(spec: &BrowserSpec, limits: &BrowserResourceLimits) -> 
     docker_dynamic(&args, "docker run browser").map(|_| ())
 }
 
+fn run_novnc_proxy_container(spec: &BrowserTargetDisplaySpec) -> Result<()> {
+    let mut args = vec![
+        "run".to_string(),
+        "-d".to_string(),
+        "--name".to_string(),
+        spec.container_name.clone(),
+        "--label".to_string(),
+        "docker-git.browser-novnc-proxy=1".to_string(),
+        "--label".to_string(),
+        format!("docker-git.browser-target={}", spec.browser_name),
+        "--label".to_string(),
+        format!("docker-git.browser-vnc-endpoint={}", spec.vnc_endpoint),
+        "--network".to_string(),
+        spec.network_mode.clone(),
+    ];
+
+    if should_publish_ports(&spec.network_mode) {
+        args.extend([
+            "--add-host".to_string(),
+            "host.docker.internal:host-gateway".to_string(),
+            "-p".to_string(),
+            format!("127.0.0.1:{}:{}", spec.novnc_port, spec.novnc_port),
+        ]);
+    }
+
+    args.extend([
+        "-e".to_string(),
+        format!("BROWSER_CONNECTION_VNC_ENDPOINT={}", spec.vnc_endpoint),
+        "-e".to_string(),
+        format!("BROWSER_CONNECTION_NOVNC_PORT={}", spec.novnc_port),
+        spec.image_name.clone(),
+    ]);
+
+    docker_dynamic(&args, "docker run noVNC proxy").map(|_| ())
+}
+
 fn cdp_probe_candidates(spec: &BrowserSpec) -> Vec<String> {
     let mut candidates = if should_publish_ports(&spec.network_mode) {
         vec![format!("http://127.0.0.1:{}/json/version", spec.ports.cdp)]
@@ -491,6 +578,30 @@ fn novnc_probe_candidates(spec: &BrowserSpec) -> Vec<String> {
             "http://{}:{}/vnc.html?autoconnect=true&resize=remote&path=websockify",
             ip,
             crate::BROWSER_NOVNC_PORT
+        ));
+    }
+
+    candidates.sort();
+    candidates.dedup();
+    candidates
+}
+
+fn novnc_proxy_probe_candidates(spec: &BrowserTargetDisplaySpec) -> Vec<String> {
+    let mut candidates = vec![crate::render_novnc_url_for_port(spec.novnc_port)];
+
+    if let Some(container_name) = spec.network_mode.strip_prefix("container:") {
+        if let Ok(Some(ip)) = inspect_container_ip(container_name) {
+            candidates.push(format!(
+                "http://{}:{}/vnc.html?autoconnect=true&resize=remote&path=websockify",
+                ip, spec.novnc_port
+            ));
+        }
+    }
+
+    if let Ok(Some(ip)) = inspect_container_ip(&spec.container_name) {
+        candidates.push(format!(
+            "http://{}:{}/vnc.html?autoconnect=true&resize=remote&path=websockify",
+            ip, spec.novnc_port
         ));
     }
 
@@ -570,6 +681,29 @@ fn wait_for_novnc(spec: &BrowserSpec) -> Result<String> {
     }
     Err(anyhow!(
         "browser noVNC endpoint did not become ready; tried: {}",
+        last_candidates.join(", ")
+    ))
+}
+
+fn wait_for_novnc_proxy(spec: &BrowserTargetDisplaySpec) -> Result<String> {
+    ensure_curl_available()?;
+    let mut last_candidates = Vec::new();
+    for _ in 0..30 {
+        last_candidates = novnc_proxy_probe_candidates(spec);
+        for url in &last_candidates {
+            let status = Command::new("curl")
+                .args(["-sSf", "--connect-timeout", "2", "--max-time", "5", url])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+            if matches!(status, Ok(exit) if exit.success()) {
+                return Ok(url.to_string());
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_secs(1));
+    }
+    Err(anyhow!(
+        "browser target noVNC proxy did not become ready; tried: {}",
         last_candidates.join(", ")
     ))
 }
@@ -665,76 +799,50 @@ impl Drop for BrowserBuildContext {
     }
 }
 
+struct NovncProxyBuildContext {
+    path: PathBuf,
+    dockerfile: PathBuf,
+}
+
+impl NovncProxyBuildContext {
+    fn create() -> Result<Self> {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .context("system clock before unix epoch")?
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("docker-git-novnc-proxy-build-{nonce}"));
+        fs::create_dir_all(&path)
+            .with_context(|| format!("failed to create {}", path.display()))?;
+        let dockerfile = path.join("Dockerfile.novnc-proxy");
+        fs::write(&dockerfile, NOVNC_PROXY_DOCKERFILE)
+            .context("failed to write noVNC proxy Dockerfile")?;
+        fs::write(
+            path.join("docker-git-novnc-proxy-start.sh"),
+            NOVNC_PROXY_START_SCRIPT,
+        )
+        .context("failed to write noVNC proxy start script")?;
+        Ok(Self { path, dockerfile })
+    }
+
+    fn path_str(&self) -> &str {
+        path_to_str(&self.path)
+    }
+
+    fn dockerfile_path_str(&self) -> &str {
+        path_to_str(&self.dockerfile)
+    }
+}
+
+impl Drop for NovncProxyBuildContext {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.path);
+    }
+}
+
 fn path_to_str(path: &Path) -> &str {
     path.to_str()
         .expect("temporary Docker build path must be valid UTF-8")
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn missing_project_container_falls_back_to_bridge_network() {
-        assert_eq!(
-            effective_network_mode("container:dg-missing", None),
-            "bridge"
-        );
-        assert_eq!(
-            effective_network_mode("container:dg-project", Some("running")),
-            "container:dg-project"
-        );
-        assert_eq!(effective_network_mode("bridge", None), "bridge");
-    }
-
-    #[test]
-    fn browser_resource_limit_args_are_omitted_when_limits_are_empty() {
-        assert!(browser_resource_limit_args(&BrowserResourceLimits::none()).is_empty());
-    }
-
-    #[test]
-    fn browser_resource_limit_args_render_docker_run_limits() {
-        assert_eq!(
-            browser_resource_limit_args(&BrowserResourceLimits::from_values(
-                Some("0.5"),
-                Some("1g")
-            )),
-            vec![
-                "--cpus".to_string(),
-                "0.5".to_string(),
-                "--memory".to_string(),
-                "1g".to_string()
-            ]
-        );
-    }
-
-    #[test]
-    fn docker_host_autodetect_keeps_explicit_env_and_project_env_precedence() {
-        assert_eq!(
-            selected_docker_host_override(
-                Some("tcp://explicit.example:2375"),
-                Some("tcp://project.example:2375"),
-                false,
-                true,
-            ),
-            None
-        );
-        assert_eq!(
-            selected_docker_host_override(None, Some("tcp://project.example:2375"), false, true),
-            Some("tcp://project.example:2375".to_string())
-        );
-    }
-
-    #[test]
-    fn docker_host_autodetect_falls_back_to_host_docker_internal_when_socket_missing() {
-        assert_eq!(
-            selected_docker_host_override(None, None, false, true),
-            Some("tcp://host.docker.internal:2375".to_string())
-        );
-        assert_eq!(selected_docker_host_override(None, None, true, true), None);
-        assert_eq!(
-            selected_docker_host_override(None, None, false, false),
-            None
-        );
-    }
-}
+mod tests;

@@ -1,0 +1,268 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <title>Browser Share</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+        font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        font-size: 13px;
+      }
+
+      body {
+        margin: 0;
+        min-width: 320px;
+        max-width: 360px;
+        color: #1f2328;
+        background: #ffffff;
+      }
+
+      main {
+        display: grid;
+        gap: 12px;
+        padding: 14px;
+      }
+
+      h1 {
+        margin: 0;
+        font-size: 16px;
+        font-weight: 650;
+      }
+
+      label {
+        display: grid;
+        gap: 5px;
+        font-weight: 600;
+      }
+
+      input,
+      textarea {
+        box-sizing: border-box;
+        width: 100%;
+        border: 1px solid #d0d7de;
+        border-radius: 6px;
+        padding: 8px;
+        font: inherit;
+      }
+
+      textarea {
+        min-height: 74px;
+        resize: vertical;
+      }
+
+      .status {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+        border: 1px solid #d0d7de;
+        border-radius: 6px;
+        padding: 8px;
+      }
+
+      .status strong {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .dot {
+        width: 9px;
+        height: 9px;
+        flex: 0 0 auto;
+        border-radius: 999px;
+        background: #8c959f;
+      }
+
+      .dot.connected {
+        background: #1a7f37;
+      }
+
+      .dot.error {
+        background: #cf222e;
+      }
+
+      .actions {
+        display: grid;
+        grid-template-columns: 1fr 1fr 1fr;
+        gap: 8px;
+      }
+
+      .recorder {
+        display: grid;
+        gap: 8px;
+        border-top: 1px solid #d0d7de;
+        padding-top: 12px;
+      }
+
+      .recorder-head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+      }
+
+      .recorder-head strong {
+        font-size: 14px;
+      }
+
+      .recording-pill {
+        border: 1px solid #d0d7de;
+        border-radius: 999px;
+        padding: 3px 8px;
+        color: #57606a;
+        font-size: 12px;
+        font-weight: 700;
+      }
+
+      .recording-pill.active {
+        border-color: #1a7f37;
+        color: #1a7f37;
+      }
+
+      .record-actions {
+        display: grid;
+        grid-template-columns: 1fr 1fr 1fr;
+        gap: 8px;
+      }
+
+      .recorder-note {
+        margin: 0;
+        color: #57606a;
+        line-height: 1.35;
+      }
+
+      button {
+        border: 1px solid #d0d7de;
+        border-radius: 6px;
+        padding: 8px 10px;
+        font: inherit;
+        font-weight: 600;
+        color: #24292f;
+        background: #f6f8fa;
+        cursor: pointer;
+      }
+
+      button.primary {
+        color: #ffffff;
+        border-color: #0969da;
+        background: #0969da;
+      }
+
+      button:disabled {
+        cursor: not-allowed;
+        opacity: 0.55;
+      }
+
+      .note {
+        margin: 0;
+        color: #57606a;
+        line-height: 1.35;
+      }
+
+      .error {
+        display: none;
+        color: #cf222e;
+        line-height: 1.35;
+      }
+
+      .error.visible {
+        display: block;
+      }
+
+      @media (prefers-color-scheme: dark) {
+        body {
+          color: #e6edf3;
+          background: #0d1117;
+        }
+
+        input,
+        textarea,
+        .status,
+        button {
+          border-color: #30363d;
+          color: #e6edf3;
+          background: #161b22;
+        }
+
+        button.primary {
+          border-color: #1f6feb;
+          background: #1f6feb;
+        }
+
+        .note {
+          color: #8b949e;
+        }
+
+        .recorder-note {
+          color: #8b949e;
+        }
+
+        .recorder {
+          border-color: #30363d;
+        }
+
+        .recording-pill {
+          border-color: #30363d;
+          color: #8b949e;
+        }
+
+        .recording-pill.active {
+          border-color: #3fb950;
+          color: #3fb950;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Browser Share</h1>
+
+      <div class="status">
+        <span class="dot" id="statusDot"></span>
+        <strong id="statusText">Loading</strong>
+      </div>
+
+      <label for="relayUrl">
+        Relay URL
+        <input id="relayUrl" type="url" spellcheck="false" autocomplete="off">
+      </label>
+
+      <label for="shareUrl">
+        Share link
+        <textarea id="shareUrl" readonly spellcheck="false"></textarea>
+      </label>
+
+      <div class="actions">
+        <button class="primary" id="shareButton" type="button">Share</button>
+        <button id="stopButton" type="button">Stop</button>
+        <button id="copyButton" type="button">Copy</button>
+      </div>
+
+      <section class="recorder">
+        <div class="recorder-head">
+          <strong>Action recorder</strong>
+          <span id="recordingStatus" class="recording-pill">idle</span>
+        </div>
+        <div class="record-actions">
+          <button class="primary" id="recordButton" type="button">Record</button>
+          <button id="inspectButton" type="button">Inspect</button>
+          <button id="playRecordButton" type="button">Play</button>
+          <button id="stopRecordButton" type="button">Stop rec</button>
+          <button id="clearRecordButton" type="button">Clear</button>
+          <button id="copyScriptButton" type="button">Copy script</button>
+        </div>
+        <p class="recorder-note">After Record starts, a floating recorder stays visible on each supported page.</p>
+        <textarea id="recordedScript" readonly spellcheck="false" placeholder="Records actions from all http/https tabs where this extension is active."></textarea>
+      </section>
+
+      <p class="note">
+        Keep this browser open while sharing. Anyone with the share link can control this browser session through the relay.
+      </p>
+      <p class="error" id="errorText"></p>
+    </main>
+
+    <script src="popup.js"></script>
+  </body>
+</html>

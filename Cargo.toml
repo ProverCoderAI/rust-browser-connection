@@ -6,6 +6,11 @@ description = "Rust module for noVNC + browser connection (single browser for do
 license = "MIT"
 keywords = ["docker-git", "browser", "novnc", "cdp", "playwright", "rust"]
 repository = "https://github.com/ProverCoderAI/rust-browser-connection"
+exclude = [
+    "browser-extension/**",
+    "artifacts/*.zip",
+    "artifacts/*.tar.gz",
+]
 
 [lib]
 name = "docker_git_browser_connection"
@@ -22,11 +27,16 @@ clap = { version = "=4.4.18", features = ["derive"] }
 anyhow = "1.0"
 log = "0.4"
 env_logger = "0.11"
-tungstenite = "0.24"
+tungstenite = { version = "0.24", features = ["native-tls"] }
+getrandom = "0.2"
 
 [[bin]]
 name = "browser-connection"
 path = "src/bin/browser-connection.rs"
+
+[[bin]]
+name = "browser-connection-relay"
+path = "src/bin/browser-connection-relay.rs"
 
 [dev-dependencies]
 tempfile = "=3.10.1"
